@@ -102,6 +102,188 @@ jobs:
           cat time_parquet.txt
           echo "Parquet file size: $(du -sh out.parquet | cut -f1)"
 
+      # ── Install Python validation deps (once, before all validators) ───────────
+      - name: Install Python validation deps
+        run: pip install pyyaml pyarrow --quiet
+
+      # ── Structural validation — each format checked independently ────────────
+      - name: Validate JSONL structure
+        run: |
+          python3 - <<'EOF'
+          import sys, json
+
+          errors = 0
+          lines_checked = 0
+          with open("out.jsonl") as f:
+              for i, raw in enumerate(f, 1):
+                  line = raw.strip()
+                  if not line:
+                      continue
+                  try:
+                      obj = json.loads(line)
+                  except json.JSONDecodeError as e:
+                      print(f"JSONL ERROR line {i}: {e}")
+                      errors += 1
+                      if errors >= 10:
+                          print("Too many errors, stopping early.")
+                          break
+                      continue
+                  if not isinstance(obj, dict):
+                      print(f"JSONL ERROR line {i}: expected object, got {type(obj).__name__}")
+                      errors += 1
+                  lines_checked += 1
+
+          if errors:
+              sys.exit(1)
+          print(f"JSONL OK — {lines_checked} objects, all valid")
+          EOF
+
+      - name: Validate JSON structure
+        run: |
+          python3 - <<'EOF'
+          import sys, json
+
+          with open("out.json") as f:
+              try:
+                  data = json.load(f)
+              except json.JSONDecodeError as e:
+                  print(f"JSON ERROR: {e}")
+                  sys.exit(1)
+
+          if not isinstance(data, list):
+              print(f"JSON ERROR: top-level value is {type(data).__name__}, expected array")
+              sys.exit(1)
+
+          non_objects = [i for i, v in enumerate(data) if not isinstance(v, dict)]
+          if non_objects:
+              print(f"JSON ERROR: {len(non_objects)} non-object entries (first at index {non_objects[0]})")
+              sys.exit(1)
+
+          print(f"JSON OK — array of {len(data)} objects")
+          EOF
+
+      - name: Validate CSV structure
+        run: |
+          python3 - <<'EOF'
+          import sys, csv
+
+          errors = 0
+          with open("out.csv", newline="") as f:
+              reader = csv.reader(f)
+              header = next(reader, None)
+              if header is None:
+                  print("CSV ERROR: file is empty")
+                  sys.exit(1)
+              if not header:
+                  print("CSV ERROR: header row has no columns")
+                  sys.exit(1)
+
+              col_count = len(header)
+              row_count = 0
+              for i, row in enumerate(reader, 2):
+                  row_count += 1
+                  if len(row) != col_count:
+                      print(f"CSV ERROR row {i}: expected {col_count} columns, got {len(row)}")
+                      errors += 1
+                      if errors >= 10:
+                          print("Too many errors, stopping early.")
+                          break
+
+          if errors:
+              sys.exit(1)
+          print(f"CSV OK — {col_count} columns, {row_count} data rows")
+          EOF
+
+      - name: Validate YAML structure
+        run: |
+          python3 - <<'EOF'
+          import sys, yaml
+
+          errors = 0
+          doc_count = 0
+          with open("out.yaml") as f:
+              for doc in yaml.safe_load_all(f):
+                  doc_count += 1
+                  if doc is not None and not isinstance(doc, dict):
+                      print(f"YAML ERROR doc {doc_count}: expected mapping, got {type(doc).__name__}")
+                      errors += 1
+                      if errors >= 10:
+                          break
+
+          if errors:
+              sys.exit(1)
+          print(f"YAML OK — {doc_count} documents, all valid mappings")
+          EOF
+
+      - name: Validate TOML structure
+        run: |
+          python3 - <<'EOF'
+          import sys, tomllib
+
+          with open("out.toml", "rb") as f:
+              try:
+                  data = tomllib.load(f)
+              except tomllib.TOMLDecodeError as e:
+                  print(f"TOML ERROR: {e}")
+                  sys.exit(1)
+
+          if not data:
+              print("TOML OK — empty file")
+              sys.exit(0)
+
+          errors = 0
+          total_rows = 0
+          for key, value in data.items():
+              if not isinstance(value, list):
+                  print(f"TOML ERROR: key [{key!r}] is {type(value).__name__}, expected array of tables")
+                  errors += 1
+                  continue
+              for i, entry in enumerate(value):
+                  if not isinstance(entry, dict):
+                      print(f"TOML ERROR: [[{key}]] entry {i} is {type(entry).__name__}, expected table")
+                      errors += 1
+                      if errors >= 10:
+                          break
+              total_rows += len(value)
+
+          if errors:
+              sys.exit(1)
+          print(f"TOML OK — {total_rows} table entries across {len(data)} key(s)")
+          EOF
+
+      - name: Validate Parquet structure
+        run: |
+          python3 - <<'EOF'
+          import sys
+          import pyarrow.parquet as pq
+
+          try:
+              meta = pq.read_metadata("out.parquet")
+          except Exception as e:
+              print(f"Parquet ERROR reading metadata: {e}")
+              sys.exit(1)
+
+          try:
+              schema = pq.read_schema("out.parquet")
+          except Exception as e:
+              print(f"Parquet ERROR reading schema: {e}")
+              sys.exit(1)
+
+          if len(schema) == 0:
+              print("Parquet ERROR: schema has 0 columns")
+              sys.exit(1)
+
+          # Read the first row group to verify data pages are not corrupt.
+          try:
+              first_batch = pq.read_table("out.parquet").slice(0, 1)
+          except Exception as e:
+              print(f"Parquet ERROR reading first row: {e}")
+              sys.exit(1)
+
+          print(f"Parquet OK — {meta.num_rows} rows, {len(schema)} columns")
+          print(f"  Schema: {', '.join(f.name for f in schema)}")
+          EOF
+
       # ── Stdin streaming smoke-test ───────────────────────────────────────────
       - name: Stdin pipe smoke-test
         run: |
