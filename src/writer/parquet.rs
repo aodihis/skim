@@ -191,6 +191,12 @@ fn rows_to_record_batch(
     arrow_schema: &Arc<ArrowSchema>,
     rows: &[Row],
 ) -> anyhow::Result<RecordBatch> {
+    if arrow_schema.fields().is_empty() && !rows.is_empty() {
+        anyhow::bail!(
+            "cannot write {} row(s): schema has 0 columns (no CREATE TABLE and no rows to infer from)",
+            rows.len()
+        );
+    }
     let mut cols: Vec<ArrayRef> = Vec::with_capacity(arrow_schema.fields().len());
 
     for (i, field) in arrow_schema.fields().iter().enumerate() {

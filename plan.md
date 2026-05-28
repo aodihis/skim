@@ -42,6 +42,7 @@ OPTIONS:
 | `.jsonl`  | Newline-delimited JSON |
 | `.csv`    | CSV |
 | `.yaml` / `.yml` | YAML |
+| `.toml`   | TOML (array of tables) |
 | `.parquet` | Apache Parquet |
 | *(anything else / stdout)* | **JSON** |
 
@@ -146,10 +147,10 @@ Batch flushing: every `--batch-size` rows (default 10 000) via Arrow builders
 | 1 | Scaffold — Cargo.toml, cli.rs, empty stubs | ✅ done |
 | 2 | Core data types — Value, Row, Schema, Error | ✅ done |
 | 3 | State machine — StatementExtractor + 12 tests | ✅ done |
-| 4 | SQL value parser — sqlparser AST → Row / Schema | 🔄 next |
-| 5 | Writers — JSONL, JSON, CSV, YAML, Parquet | ⏳ |
-| 6 | Main pipeline — wire everything together | ⏳ |
-| 7 | Polish — real dump files, memory/perf tests | ⏳ |
+| 4 | SQL value parser — sqlparser AST → Row / Schema | ✅ done |
+| 5 | Writers — JSONL, JSON, CSV, YAML, TOML, Parquet | ✅ done |
+| 6 | Main pipeline — wire everything together | ✅ done |
+| 7 | Polish — real dump files, memory/perf tests | ✅ done |
 
 ---
 
