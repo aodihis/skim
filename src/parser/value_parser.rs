@@ -62,10 +62,13 @@ pub fn extract_rows(sql: &str, schema: &Schema, dialect: SqlDialect) -> anyhow::
     let remap: Option<Vec<Option<usize>>> =
         if !insert.columns.is_empty() && schema.column_count() > 0 {
             // Lowercase names from the INSERT column list for case-insensitive matching.
+            // ObjectName::to_string() includes quote chars (e.g. "`id`", `"id"`).
+            // Strip backticks and double-quotes so the name matches the bare
+            // column names stored in the schema.
             let insert_names: Vec<String> = insert
                 .columns
                 .iter()
-                .map(|c| c.to_string().to_lowercase())
+                .map(|c| c.to_string().trim_matches(&['`', '"'][..]).to_lowercase())
                 .collect();
 
             Some(

@@ -325,7 +325,7 @@ impl<R: BufRead> StatementExtractor<R> {
             State::SkipDelimiter { delim } => {
                 let delim = delim.clone();
                 // Accumulate into buf looking for the delimiter sequence.
-                self.buf.push(b as char);
+                unsafe { self.buf.as_mut_vec().push(b) };
                 if self.buf.ends_with(std::str::from_utf8(&delim).unwrap_or("")) {
                     self.buf.clear();
                     self.state = State::Normal;
@@ -338,7 +338,11 @@ impl<R: BufRead> StatementExtractor<R> {
     /// Push `b` to the buffer without size checking (used in string/comment
     /// states where we know the content is bounded by the statement size).
     fn push(&mut self, b: u8) {
-        self.buf.push(b as char);
+        // SAFETY: we accumulate raw bytes into a Vec<u8> and re-interpret as
+        // UTF-8 only when the statement is complete.  Using push(b as char)
+        // would corrupt multi-byte sequences (e.g. Arabic / CJK text) by
+        // treating each byte as an independent Unicode code point.
+        unsafe { self.buf.as_mut_vec().push(b) };
     }
 
     /// Push `b` to the buffer with a size-limit check (used in Normal state).
@@ -350,7 +354,7 @@ impl<R: BufRead> StatementExtractor<R> {
             }
             .into());
         }
-        self.buf.push(b as char);
+        unsafe { self.buf.as_mut_vec().push(b) };
         Ok(())
     }
 

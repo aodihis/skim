@@ -122,8 +122,12 @@ fn main() -> anyhow::Result<()> {
         }
 
         // Non-INSERT statements (SET, LOCK, UNLOCK, …) — skip cheaply.
-        let trimmed = stmt.trim_start();
-        if !trimmed.get(..7).map_or(false, |p| p.eq_ignore_ascii_case("INSERT ")) {
+        // Skip past any leading comments before checking the keyword, because
+        // mysqldump often emits a comment block immediately before INSERT with
+        // no semicolon in between, so the comment and INSERT end up in the same
+        // extracted statement.
+        let effective = skip_leading_comments(&stmt);
+        if !effective.get(..7).map_or(false, |p| p.eq_ignore_ascii_case("INSERT ")) {
             continue;
         }
 
@@ -175,4 +179,31 @@ fn table_matches(name: &str, filter: &[String]) -> bool {
     let unqualified = name.rsplit('.').next().unwrap_or(name);
     let clean = unqualified.trim_matches('`').trim_matches('"').to_lowercase();
     filter.iter().any(|t| t.to_lowercase() == clean)
+}
+
+/// Return the first non-comment, non-whitespace portion of a SQL statement.
+///
+/// mysqldump places a comment block (`-- ...`) immediately before an INSERT
+/// with no intervening semicolon, so both end up in the same extracted
+/// statement.  This helper skips past those comments so we can check the
+/// actual keyword.
+fn skip_leading_comments(sql: &str) -> &str {
+    let mut s = sql.trim_start();
+    loop {
+        if s.starts_with("--") {
+            // Skip to end of line.
+            s = match s.find('\n') {
+                Some(pos) => s[pos + 1..].trim_start(),
+                None      => return "",
+            };
+        } else if s.starts_with("/*") {
+            // Skip block comment.
+            s = match s.find("*/") {
+                Some(pos) => s[pos + 2..].trim_start(),
+                None      => return "",
+            };
+        } else {
+            return s;
+        }
+    }
 }
