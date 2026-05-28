@@ -127,7 +127,7 @@ fn main() -> anyhow::Result<()> {
         // no semicolon in between, so the comment and INSERT end up in the same
         // extracted statement.
         let effective = skip_leading_comments(&stmt);
-        if !effective.get(..7).map_or(false, |p| p.eq_ignore_ascii_case("INSERT ")) {
+        if !effective.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("INSERT ")) {
             continue;
         }
 
@@ -152,7 +152,7 @@ fn main() -> anyhow::Result<()> {
             writer.write_row(&schema, &row)?;
             // Keep the spinner message fresh for stdin (no byte progress available).
             if let Some(b) = &bar {
-                if row_count % 500 == 0 {
+                if row_count.is_multiple_of(500) {
                     b.set_message(format!("{row_count} rows"));
                 }
             }

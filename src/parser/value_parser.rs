@@ -221,7 +221,7 @@ fn sql_value_to_value(v: &SqlValue) -> anyhow::Result<Value> {
 /// Invalid nibbles are silently skipped.
 fn decode_hex(s: &str) -> Vec<u8> {
     let s = s.trim();
-    let s = if s.len() % 2 != 0 { &s[1..] } else { s }; // drop odd leading nibble
+    let s = if !s.len().is_multiple_of(2) { &s[1..] } else { s }; // drop odd leading nibble
     (0..s.len())
         .step_by(2)
         .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())

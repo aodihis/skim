@@ -105,31 +105,6 @@ Pipe through `jq`:
 skim dump.sql | jq '.[] | select(.active == true)'
 ```
 
-## CI / CD
-
-| Workflow | Trigger | What it does |
-|----------|---------|-------------|
-| `ci.yml` | Push / PR to `main` | Runs `cargo test` on Linux, macOS, and Windows. Warns if `Cargo.toml` version matches the latest git tag. |
-| `release.yml` | GitHub Release published | Builds release binaries for all four targets and uploads them as release assets. |
-
-### Cutting a release
-
-1. Bump `version` in `Cargo.toml`.
-2. Tag and push:
-   ```sh
-   git tag v0.2.0 && git push --tags
-   ```
-3. Create a GitHub Release from the tag — the release workflow fires automatically and attaches the platform binaries.
-
-### Release targets
-
-| Platform | Target |
-|----------|--------|
-| Linux x86_64 | `x86_64-unknown-linux-gnu` |
-| macOS Intel | `x86_64-apple-darwin` |
-| macOS Apple Silicon | `aarch64-apple-darwin` |
-| Windows x86_64 | `x86_64-pc-windows-msvc` |
-
 ## License
 
 MIT

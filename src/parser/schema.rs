@@ -56,7 +56,7 @@ pub fn unqualified_name(name: &ObjectName) -> String {
     // Split on '.' and take the last segment, then strip any wrapping quotes.
     let full = name.to_string();
     full.split('.')
-        .last()
+        .next_back()
         .unwrap_or(&full)
         .trim_matches('"')
         .trim_matches('`')
