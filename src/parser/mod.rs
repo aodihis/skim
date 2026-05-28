@@ -2,6 +2,14 @@ pub mod schema;
 pub mod state_machine;
 pub mod value_parser;
 
+/// SQL dialect used when parsing statements.
+/// Determines which sqlparser dialect is used and how identifiers are handled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SqlDialect {
+    Mysql,
+    Postgres,
+}
+
 // ── Shared data types ────────────────────────────────────────────────────────
 
 /// A single SQL value after type coercion.

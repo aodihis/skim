@@ -57,6 +57,22 @@ pub struct Args {
     /// Shows percentage when input is a seekable file; shows row count for stdin.
     #[arg(long)]
     pub progress: bool,
+
+    /// SQL dialect of the dump file: mysql, postgres, or auto.
+    /// 'auto' detects the dialect from the dump header comment (default).
+    #[arg(long, default_value = "auto", value_name = "DIALECT")]
+    pub dialect: CliDialect,
+}
+
+/// SQL dialect selection for the --dialect flag.
+#[derive(ValueEnum, Clone, Debug, PartialEq)]
+pub enum CliDialect {
+    /// Detect from the dump header (-- MySQL dump / -- PostgreSQL database dump).
+    Auto,
+    /// MySQL / MariaDB dumps (backtick identifiers, \\' escapes).
+    Mysql,
+    /// PostgreSQL dumps (double-quote identifiers, $$ quoting, schema-qualified names).
+    Postgres,
 }
 
 /// All supported output formats.

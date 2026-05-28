@@ -11,10 +11,10 @@ use std::{
 
 use clap::Parser;
 
-use cli::{Args, OutputFormat};
+use cli::{Args, CliDialect, OutputFormat};
 use error::ConvertError;
 use parser::{
-    Schema,
+    Schema, SqlDialect,
     schema::extract_schema,
     state_machine::StatementExtractor,
     value_parser::{extract_rows, insert_table_name},
@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
 
     // ── Open input ────────────────────────────────────────────────────────────
     let file_len: Option<u64>;
-    let raw_reader: Box<dyn BufRead> = if args.is_stdin() {
+    let mut raw_reader: Box<dyn BufRead> = if args.is_stdin() {
         file_len = None;
         Box::new(BufReader::new(io::stdin()))
     } else {
@@ -48,6 +48,24 @@ fn main() -> anyhow::Result<()> {
         let f = File::open(path)?;
         file_len = f.metadata().ok().map(|m| m.len());
         Box::new(BufReader::new(f))
+    };
+
+    // ── Detect SQL dialect ────────────────────────────────────────────────────
+    // For 'auto', peek at the first buffered chunk without consuming any bytes.
+    // fill_buf() fills the BufReader's internal buffer and returns a reference
+    // to it — nothing is consumed until consume() is called.
+    let dialect = match args.dialect {
+        CliDialect::Mysql    => SqlDialect::Mysql,
+        CliDialect::Postgres => SqlDialect::Postgres,
+        CliDialect::Auto     => {
+            let buf = raw_reader.fill_buf()?;
+            let peek = &buf[..buf.len().min(2048)];
+            if memchr::memmem::find(peek, b"PostgreSQL database dump").is_some() {
+                SqlDialect::Postgres
+            } else {
+                SqlDialect::Mysql
+            }
+        }
     };
 
     // ── Optional progress bar ─────────────────────────────────────────────────
@@ -96,7 +114,7 @@ fn main() -> anyhow::Result<()> {
         let stmt = stmt_result?;
 
         // CREATE TABLE → adopt schema if the table passes the filter.
-        if let Some(s) = extract_schema(&stmt)? {
+        if let Some(s) = extract_schema(&stmt, dialect)? {
             if table_matches(&s.table_name, &args.tables) {
                 schema = s;
             }
@@ -110,7 +128,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         // INSERT → check table name against filter.
-        let tname = match insert_table_name(&stmt)? {
+        let tname = match insert_table_name(&stmt, dialect)? {
             Some(n) => n,
             None    => continue,
         };
@@ -124,7 +142,7 @@ fn main() -> anyhow::Result<()> {
             header_written = true;
         }
 
-        let rows = extract_rows(&stmt, &schema)?;
+        let rows = extract_rows(&stmt, &schema, dialect)?;
         for row in rows {
             row_count += 1;
             writer.write_row(&schema, &row)?;
@@ -146,12 +164,15 @@ fn main() -> anyhow::Result<()> {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-/// True when `name` (possibly backtick- or quote-wrapped) matches any entry
-/// in `filter`. Always returns `true` when `filter` is empty (pass-all).
+/// True when `name` matches any entry in `filter`.
+/// Strips schema prefix (`public.users` → `users`) and wrapping quotes/backticks.
+/// Always returns `true` when `filter` is empty (pass-all).
 fn table_matches(name: &str, filter: &[String]) -> bool {
     if filter.is_empty() {
         return true;
     }
-    let clean = name.trim_matches('`').trim_matches('"');
-    filter.iter().any(|t| t.eq_ignore_ascii_case(clean))
+    // Take only the last dot-separated segment to drop schema prefixes.
+    let unqualified = name.rsplit('.').next().unwrap_or(name);
+    let clean = unqualified.trim_matches('`').trim_matches('"').to_lowercase();
+    filter.iter().any(|t| t.to_lowercase() == clean)
 }

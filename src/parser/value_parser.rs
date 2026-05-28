@@ -6,10 +6,10 @@
 
 use sqlparser::ast::{Expr, SetExpr, Statement, TableObject, UnaryOperator};
 use sqlparser::ast::Value as SqlValue;
-use sqlparser::dialect::MySqlDialect;
+use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 
-use super::{Row, Schema, Value};
+use super::{Row, Schema, SqlDialect, Value};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -23,9 +23,11 @@ use super::{Row, Schema, Value};
 /// does **not** list column names (e.g. `INSERT INTO t VALUES (1, 2, 3)`).
 /// Pass a schema with empty `columns` if you have no schema yet — the
 /// function will skip the column-count check.
-pub fn extract_rows(sql: &str, schema: &Schema) -> anyhow::Result<Vec<Row>> {
-    let dialect = MySqlDialect {};
-    let stmts = Parser::parse_sql(&dialect, sql)?;
+pub fn extract_rows(sql: &str, schema: &Schema, dialect: SqlDialect) -> anyhow::Result<Vec<Row>> {
+    let stmts = match dialect {
+        SqlDialect::Mysql    => Parser::parse_sql(&MySqlDialect {},    sql)?,
+        SqlDialect::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql)?,
+    };
 
     // The state machine yields one statement at a time, so stmts has ≤ 1 element.
     let Some(stmt) = stmts.into_iter().next() else {
@@ -153,6 +155,14 @@ fn expr_to_value(expr: &Expr) -> anyhow::Result<Value> {
             Ok(Value::Null)
         }
 
+        // PostgreSQL cast: expr::TYPE — extract the value, discard the cast.
+        // e.g. '2024-01-01'::timestamp  →  Value::Text("2024-01-01")
+        //      42::bigint               →  Value::Integer(42)
+        Expr::Cast { expr, .. } => expr_to_value(expr),
+
+        // Typed string literals: TIMESTAMP '2024-01-01' — extract the inner value.
+        Expr::TypedString(ts) => sql_value_to_value(&ts.value.value),
+
         // Anything else we don't recognise: stringify it as text.
         other => Ok(Value::Text(other.to_string())),
     }
@@ -219,19 +229,28 @@ fn decode_hex(s: &str) -> Vec<u8> {
 ///
 /// Used by the main pipeline to filter statements by table name before
 /// doing the full row-extraction parse.
-pub fn insert_table_name(sql: &str) -> anyhow::Result<Option<String>> {
-    let dialect = MySqlDialect {};
-    let stmts = Parser::parse_sql(&dialect, sql)?;
+pub fn insert_table_name(sql: &str, dialect: SqlDialect) -> anyhow::Result<Option<String>> {
+    let stmts = match dialect {
+        SqlDialect::Mysql    => Parser::parse_sql(&MySqlDialect {},    sql)?,
+        SqlDialect::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql)?,
+    };
     let Some(stmt) = stmts.into_iter().next() else { return Ok(None); };
     let Statement::Insert(insert) = stmt else { return Ok(None); };
     Ok(table_name_from_object(&insert.table))
 }
 
-/// Extract the table name string from a `TableObject`.
+/// Extract the unqualified table name from a `TableObject`.
+/// Strips any schema prefix: `public.users` → `users`.
 /// Returns `None` for non-simple-name forms (table functions, sub-queries).
 pub fn table_name_from_object(obj: &TableObject) -> Option<String> {
     match obj {
-        TableObject::TableName(name) => Some(name.to_string()),
+        TableObject::TableName(name) => {
+            // ObjectName::to_string() gives "schema.table" or just "table".
+            // Split on '.' and take the last segment, stripping any wrapping quotes.
+            let full = name.to_string();
+            let unqualified = full.split('.').last().unwrap_or(&full);
+            Some(unqualified.trim_matches('"').trim_matches('`').to_string())
+        }
         _ => None,
     }
 }
@@ -264,7 +283,7 @@ mod tests {
     #[test]
     fn single_row_with_column_list() {
         let sql = "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].values[0], Value::Integer(1));
         assert_eq!(rows[0].values[1], Value::Text("Alice".into()));
@@ -275,7 +294,7 @@ mod tests {
     fn multi_row_values() {
         // One INSERT with three tuples in VALUES.
         let sql = "INSERT INTO t (a, b) VALUES (1, 'x'), (2, 'y'), (3, 'z')";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2].values[0], Value::Integer(3));
         assert_eq!(rows[2].values[1], Value::Text("z".into()));
@@ -286,7 +305,7 @@ mod tests {
     #[test]
     fn null_value() {
         let sql = "INSERT INTO t (a, b) VALUES (NULL, 'hello')";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Null);
         assert_eq!(rows[0].values[1], Value::Text("hello".into()));
     }
@@ -294,7 +313,7 @@ mod tests {
     #[test]
     fn boolean_values() {
         let sql = "INSERT INTO t (a, b) VALUES (TRUE, FALSE)";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Bool(true));
         assert_eq!(rows[0].values[1], Value::Bool(false));
     }
@@ -302,28 +321,28 @@ mod tests {
     #[test]
     fn negative_integer() {
         let sql = "INSERT INTO t (n) VALUES (-42)";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Integer(-42));
     }
 
     #[test]
     fn negative_float() {
         let sql = "INSERT INTO t (n) VALUES (-3.14)";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Float(-3.14));
     }
 
     #[test]
     fn positive_float() {
         let sql = "INSERT INTO t (price) VALUES (9.99)";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Float(9.99));
     }
 
     #[test]
     fn large_integer_max() {
         let sql = "INSERT INTO t (n) VALUES (9223372036854775807)"; // i64::MAX
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Integer(i64::MAX));
     }
 
@@ -333,14 +352,14 @@ mod tests {
     fn string_with_doubled_quote_escape() {
         // SQL standard: 'it''s fine' → "it's fine" (sqlparser unescapes this).
         let sql = "INSERT INTO t (msg) VALUES ('it''s fine')";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Text("it's fine".into()));
     }
 
     #[test]
     fn empty_string() {
         let sql = "INSERT INTO t (s) VALUES ('')";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Text("".into()));
     }
 
@@ -349,7 +368,7 @@ mod tests {
     #[test]
     fn hex_literal() {
         let sql = "INSERT INTO t (data) VALUES (X'DEADBEEF')";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
     }
 
@@ -358,7 +377,7 @@ mod tests {
     #[test]
     fn default_keyword_becomes_null() {
         let sql = "INSERT INTO t (a, b) VALUES (DEFAULT, 'foo')";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values[0], Value::Null);
         assert_eq!(rows[0].values[1], Value::Text("foo".into()));
     }
@@ -368,14 +387,14 @@ mod tests {
     #[test]
     fn set_statement_returns_empty() {
         let sql = "SET NAMES utf8mb4";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert!(rows.is_empty(), "SET should return empty vec");
     }
 
     #[test]
     fn create_table_returns_empty() {
         let sql = "CREATE TABLE t (id INT, name TEXT)";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert!(rows.is_empty(), "CREATE TABLE should return empty vec");
     }
 
@@ -386,7 +405,7 @@ mod tests {
         // Schema has 2 columns but the INSERT has 3 values — must error.
         let sql = "INSERT INTO t VALUES (1, 2, 3)";
         let s = schema(&["a", "b"]);
-        let result = extract_rows(sql, &s);
+        let result = extract_rows(sql, &s, SqlDialect::Mysql);
         assert!(result.is_err(), "column count mismatch should return an error");
     }
 
@@ -394,7 +413,7 @@ mod tests {
     fn no_schema_skips_count_check() {
         // No schema → no column-count check → any number of values is OK.
         let sql = "INSERT INTO t VALUES (1, 2, 3, 4, 5)";
-        let rows = extract_rows(sql, &no_schema()).unwrap();
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
         assert_eq!(rows[0].values.len(), 5);
     }
 
@@ -422,7 +441,7 @@ mod tests {
         // After remapping, row should be in schema order: 1, 'Bob', 'a'
         let s = schema(&["id", "name", "email"]);
         let sql = "INSERT INTO users (email, id, name) VALUES ('alice@x.com', 1, 'Alice')";
-        let rows = extract_rows(sql, &s).unwrap();
+        let rows = extract_rows(sql, &s, SqlDialect::Mysql).unwrap();
 
         assert_eq!(rows[0].values[0], Value::Integer(1),            "id");
         assert_eq!(rows[0].values[1], Value::Text("Alice".into()),  "name");
@@ -434,7 +453,7 @@ mod tests {
         // When orders match, remapping should be a no-op.
         let s = schema(&["id", "name", "email"]);
         let sql = "INSERT INTO users (id, name, email) VALUES (42, 'Bob', 'bob@x.com')";
-        let rows = extract_rows(sql, &s).unwrap();
+        let rows = extract_rows(sql, &s, SqlDialect::Mysql).unwrap();
 
         assert_eq!(rows[0].values[0], Value::Integer(42));
         assert_eq!(rows[0].values[1], Value::Text("Bob".into()));
@@ -447,10 +466,86 @@ mod tests {
         // The missing schema column should become NULL.
         let s = schema(&["id", "name", "email"]);
         let sql = "INSERT INTO users (id, name) VALUES (7, 'Carol')";
-        let rows = extract_rows(sql, &s).unwrap();
+        let rows = extract_rows(sql, &s, SqlDialect::Mysql).unwrap();
 
         assert_eq!(rows[0].values[0], Value::Integer(7));
         assert_eq!(rows[0].values[1], Value::Text("Carol".into()));
         assert_eq!(rows[0].values[2], Value::Null, "missing email should be NULL");
+    }
+
+    // ── PostgreSQL dialect ──────────────────────────────────────────────────
+
+    #[test]
+    fn pg_double_quoted_identifiers() {
+        // pg_dump uses double-quoted identifiers.
+        let sql = r#"INSERT INTO "users" ("id", "name") VALUES (1, 'Alice')"#;
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Postgres).unwrap();
+        assert_eq!(rows[0].values[0], Value::Integer(1));
+        assert_eq!(rows[0].values[1], Value::Text("Alice".into()));
+    }
+
+    #[test]
+    fn pg_schema_qualified_table_name() {
+        // pg_dump writes INSERT INTO public.users — the schema prefix must be
+        // stripped so that -t users matches.
+        let sql = "INSERT INTO public.users (id, name) VALUES (1, 'Alice')";
+        let name = insert_table_name(sql, SqlDialect::Postgres).unwrap();
+        assert_eq!(name.as_deref(), Some("users"));
+    }
+
+    #[test]
+    fn pg_dollar_quoted_string() {
+        // PostgreSQL $$ quoting — sqlparser returns the inner text.
+        let sql = "INSERT INTO t (msg) VALUES ($$hello world$$)";
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Postgres).unwrap();
+        assert_eq!(rows[0].values[0], Value::Text("hello world".into()));
+    }
+
+    #[test]
+    fn pg_cast_discards_type_annotation() {
+        // '2024-01-01'::timestamp — cast is stripped, inner string value kept.
+        let sql = "INSERT INTO t (created_at) VALUES ('2024-01-01'::timestamp)";
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Postgres).unwrap();
+        assert_eq!(rows[0].values[0], Value::Text("2024-01-01".into()));
+    }
+
+    #[test]
+    fn pg_cast_on_integer() {
+        // 42::bigint — cast is stripped, integer value kept.
+        let sql = "INSERT INTO t (n) VALUES (42::bigint)";
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Postgres).unwrap();
+        assert_eq!(rows[0].values[0], Value::Integer(42));
+    }
+
+    #[test]
+    fn pg_null_value() {
+        let sql = "INSERT INTO t (a, b) VALUES (NULL, 'hello')";
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Postgres).unwrap();
+        assert_eq!(rows[0].values[0], Value::Null);
+        assert_eq!(rows[0].values[1], Value::Text("hello".into()));
+    }
+
+    #[test]
+    fn pg_boolean_values() {
+        let sql = "INSERT INTO t (a, b) VALUES (TRUE, FALSE)";
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Postgres).unwrap();
+        assert_eq!(rows[0].values[0], Value::Bool(true));
+        assert_eq!(rows[0].values[1], Value::Bool(false));
+    }
+
+    #[test]
+    fn pg_multi_row_values() {
+        let sql = "INSERT INTO t (id, val) VALUES (1, 'x'), (2, 'y'), (3, 'z')";
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Postgres).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[2].values[0], Value::Integer(3));
+        assert_eq!(rows[2].values[1], Value::Text("z".into()));
+    }
+
+    #[test]
+    fn pg_negative_number() {
+        let sql = "INSERT INTO t (n) VALUES (-99)";
+        let rows = extract_rows(sql, &no_schema(), SqlDialect::Postgres).unwrap();
+        assert_eq!(rows[0].values[0], Value::Integer(-99));
     }
 }
