@@ -214,6 +214,19 @@ fn decode_hex(s: &str) -> Vec<u8> {
         .collect()
 }
 
+/// Return the table name from an INSERT statement, or `None` if the SQL is
+/// not an INSERT (SET, LOCK, CREATE TABLE, etc. all return `None`).
+///
+/// Used by the main pipeline to filter statements by table name before
+/// doing the full row-extraction parse.
+pub fn insert_table_name(sql: &str) -> anyhow::Result<Option<String>> {
+    let dialect = MySqlDialect {};
+    let stmts = Parser::parse_sql(&dialect, sql)?;
+    let Some(stmt) = stmts.into_iter().next() else { return Ok(None); };
+    let Statement::Insert(insert) = stmt else { return Ok(None); };
+    Ok(table_name_from_object(&insert.table))
+}
+
 /// Extract the table name string from a `TableObject`.
 /// Returns `None` for non-simple-name forms (table functions, sub-queries).
 pub fn table_name_from_object(obj: &TableObject) -> Option<String> {

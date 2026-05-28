@@ -1,2 +1,72 @@
-// Phase 6 — stub
-// Will wrap BufReader in an indicatif progress-bar reader.
+use std::io::{self, BufRead, Read};
+
+use indicatif::{ProgressBar, ProgressStyle};
+
+/// Wraps any `BufRead` and increments an indicatif `ProgressBar` with every
+/// byte consumed. Byte tracking happens in `consume` so `read_line` / `read_until`
+/// (used by `StatementExtractor`) is covered without double-counting.
+pub struct ProgressReader<R: BufRead> {
+    inner: R,
+    bar: ProgressBar,
+}
+
+impl<R: BufRead> ProgressReader<R> {
+    pub fn new(inner: R, bar: ProgressBar) -> Self {
+        Self { inner, bar }
+    }
+}
+
+impl<R: BufRead> Read for ProgressReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Copy from the inner buffer, then consume via our own `consume` so
+        // that the progress bar is updated exactly once per byte.
+        let n = {
+            let available = BufRead::fill_buf(self)?;
+            let n = available.len().min(buf.len());
+            buf[..n].copy_from_slice(&available[..n]);
+            n
+        };
+        BufRead::consume(self, n);
+        Ok(n)
+    }
+}
+
+impl<R: BufRead> BufRead for ProgressReader<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        self.inner.fill_buf()
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.inner.consume(amt);
+        if amt > 0 {
+            self.bar.inc(amt as u64);
+        }
+    }
+}
+
+/// Build a progress bar suited to the input source.
+/// - Seekable file (known length): byte-progress bar with ETA.
+/// - Stdin (unknown length): spinner that shows elapsed time.
+pub fn make_bar(file_len: Option<u64>) -> ProgressBar {
+    match file_len {
+        Some(len) => {
+            let bar = ProgressBar::new(len);
+            bar.set_style(
+                ProgressStyle::with_template(
+                    "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+                )
+                .unwrap()
+                .progress_chars("=>-"),
+            );
+            bar
+        }
+        None => {
+            let bar = ProgressBar::new_spinner();
+            bar.set_style(
+                ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
+                    .unwrap(),
+            );
+            bar
+        }
+    }
+}
