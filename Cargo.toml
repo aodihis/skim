@@ -1,0 +1,45 @@
+[package]
+name        = "skim"
+version     = "0.1.0"
+edition     = "2021"
+description = "Stream SQL dump files and convert INSERT rows to JSON, JSONL, CSV, YAML, or Parquet"
+license     = "MIT"
+
+[[bin]]
+name = "skim"
+path = "src/main.rs"
+
+[dependencies]
+# CLI — https://docs.rs/clap/latest/clap/
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+# https://docs.rs/anyhow
+anyhow    = "1"
+# https://docs.rs/thiserror
+thiserror = "2.0.18"
+
+# SQL parsing — https://docs.rs/sqlparser
+sqlparser = "0.62.0"
+
+# JSON / JSONL — https://serde.rs  https://docs.rs/serde_json
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CSV — https://docs.rs/csv
+csv = "1"
+
+# YAML — https://docs.rs/serde_yaml
+serde_yaml = "0.9"
+
+# Parquet + Arrow
+# https://docs.rs/parquet  https://arrow.apache.org/docs/rust/
+parquet      = "58.3.0"
+arrow-array  = "58.3.0"
+arrow-schema = "58.3.0"
+
+# Progress bar — https://docs.rs/indicatif
+indicatif = "0.18.4"
+
+# Fast byte scanning — https://docs.rs/memchr
+memchr = "2"
