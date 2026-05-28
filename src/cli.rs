@@ -1,7 +1,7 @@
 use clap::{Parser, ValueEnum};
 use std::path::PathBuf;
 
-/// Convert SQL dump files (INSERT statements) to JSON, JSONL, CSV, YAML, or Parquet.
+/// Convert SQL dump files (INSERT statements) to JSON, JSONL, CSV, YAML, TOML, or Parquet.
 ///
 /// The output format is inferred from the output file extension.
 /// Use --format to override or to set a format when writing to stdout.
@@ -11,6 +11,7 @@ use std::path::PathBuf;
 ///   .jsonl   → Newline-delimited JSON (one object per line)
 ///   .csv     → CSV
 ///   .yaml / .yml → YAML
+///   .toml    → TOML (array of tables)
 ///   .parquet → Parquet (requires a real file path, not stdout)
 ///
 /// Default (no -o / unrecognised extension / stdout): JSON
@@ -69,6 +70,8 @@ pub enum OutputFormat {
     Csv,
     /// YAML documents  (e.g. output.yaml)
     Yaml,
+    /// TOML array of tables  (e.g. output.toml)
+    Toml,
     /// Apache Parquet  (e.g. output.parquet) — requires a real file path
     Parquet,
 }
@@ -89,13 +92,15 @@ impl Args {
         // 2. Infer from output file extension.
         if let Some(path) = &self.output {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                return match ext.to_ascii_lowercase().as_str() {
-                    "json"    => OutputFormat::Json,
-                    "jsonl"   => OutputFormat::Jsonl,
-                    "csv"     => OutputFormat::Csv,
-                    "yaml" | "yml" => OutputFormat::Yaml,
-                    "parquet" => OutputFormat::Parquet,
-                    _         => OutputFormat::Json,
+                return match ext {
+                    e if e.eq_ignore_ascii_case("json")    => OutputFormat::Json,
+                    e if e.eq_ignore_ascii_case("jsonl")   => OutputFormat::Jsonl,
+                    e if e.eq_ignore_ascii_case("csv")     => OutputFormat::Csv,
+                    e if e.eq_ignore_ascii_case("yaml")
+                      || e.eq_ignore_ascii_case("yml")     => OutputFormat::Yaml,
+                    e if e.eq_ignore_ascii_case("toml")    => OutputFormat::Toml,
+                    e if e.eq_ignore_ascii_case("parquet") => OutputFormat::Parquet,
+                    _                                      => OutputFormat::Json,
                 };
             }
         }

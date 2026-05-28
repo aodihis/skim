@@ -32,6 +32,9 @@ csv = "1"
 # YAML — https://docs.rs/serde_yaml
 serde_yaml = "0.9"
 
+# TOML — https://docs.rs/toml
+toml = "0.8"
+
 # Parquet + Arrow
 # https://docs.rs/parquet  https://arrow.apache.org/docs/rust/
 parquet      = "58.3.0"

@@ -25,6 +25,7 @@ use writer::{
     json::JsonWriter,
     jsonl::JsonlWriter,
     parquet::ParquetWriter,
+    toml::TomlWriter,
     yaml::YamlWriter,
 };
 
@@ -79,6 +80,7 @@ fn main() -> anyhow::Result<()> {
                 OutputFormat::Jsonl   => Box::new(JsonlWriter::new(out)),
                 OutputFormat::Csv     => Box::new(CsvWriter::new(out, args.no_header)),
                 OutputFormat::Yaml    => Box::new(YamlWriter::new(out)),
+                OutputFormat::Toml    => Box::new(TomlWriter::new(out)),
                 OutputFormat::Parquet => unreachable!(),
             }
         }
@@ -150,6 +152,6 @@ fn table_matches(name: &str, filter: &[String]) -> bool {
     if filter.is_empty() {
         return true;
     }
-    let clean = name.trim_matches('`').trim_matches('"').to_lowercase();
-    filter.iter().any(|t| t.to_lowercase() == clean)
+    let clean = name.trim_matches('`').trim_matches('"');
+    filter.iter().any(|t| t.eq_ignore_ascii_case(clean))
 }

@@ -1,0 +1,161 @@
+name: Large-file integration test
+
+# Triggered manually only. Point it at any raw SQL dump URL from your fixtures repo.
+on:
+  workflow_dispatch:
+    inputs:
+      sql_url:
+        description: "Direct download URL of the SQL dump file (raw GitHub URL, S3, etc.)"
+        required: true
+        type: string
+      table_filter:
+        description: "Table name to pass with -t (leave blank to convert all tables)"
+        required: false
+        default: ""
+        type: string
+      rss_limit_mb:
+        description: "Fail if peak RSS (MiB) exceeds this value"
+        required: false
+        default: "200"
+        type: string
+
+jobs:
+  integration:
+    name: Stream + profile
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Build ────────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build release binary
+        run: cargo build --release
+
+      # ── Fetch fixture ────────────────────────────────────────────────────────
+      - name: Download SQL dump
+        run: |
+          curl -fsSL "${{ inputs.sql_url }}" -o fixture.sql
+          echo "fixture size: $(du -sh fixture.sql | cut -f1)"
+          wc -l fixture.sql
+
+      # ── Helper: build the -t flag if a filter was supplied ───────────────────
+      - name: Resolve table filter flag
+        id: tfilter
+        run: |
+          if [ -n "${{ inputs.table_filter }}" ]; then
+            echo "flag=-t ${{ inputs.table_filter }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Format runs with peak-RSS capture ───────────────────────────────────
+      - name: Convert → JSONL  (memory profiled)
+        id: run_jsonl
+        run: |
+          /usr/bin/time -v \
+            ./target/release/skim fixture.sql -f jsonl ${{ steps.tfilter.outputs.flag }} -o out.jsonl \
+            2> time_jsonl.txt
+          cat time_jsonl.txt
+          ROW_COUNT=$(wc -l < out.jsonl)
+          echo "rows=$ROW_COUNT" >> "$GITHUB_OUTPUT"
+          echo "JSONL rows: $ROW_COUNT"
+
+      - name: Convert → JSON
+        run: |
+          ./target/release/skim fixture.sql -f json ${{ steps.tfilter.outputs.flag }} -o out.json
+          echo "JSON file size: $(du -sh out.json | cut -f1)"
+
+      - name: Convert → CSV
+        run: |
+          ./target/release/skim fixture.sql -f csv ${{ steps.tfilter.outputs.flag }} -o out.csv
+          echo "CSV rows (incl. header): $(wc -l < out.csv)"
+
+      - name: Convert → YAML
+        run: |
+          ./target/release/skim fixture.sql -f yaml ${{ steps.tfilter.outputs.flag }} -o out.yaml
+          echo "YAML file size: $(du -sh out.yaml | cut -f1)"
+
+      - name: Convert → TOML
+        run: |
+          ./target/release/skim fixture.sql -f toml ${{ steps.tfilter.outputs.flag }} -o out.toml
+          echo "TOML file size: $(du -sh out.toml | cut -f1)"
+
+      - name: Convert → Parquet
+        run: |
+          /usr/bin/time -v \
+            ./target/release/skim fixture.sql -o out.parquet ${{ steps.tfilter.outputs.flag }} \
+            2> time_parquet.txt
+          cat time_parquet.txt
+          echo "Parquet file size: $(du -sh out.parquet | cut -f1)"
+
+      # ── Stdin streaming smoke-test ───────────────────────────────────────────
+      - name: Stdin pipe smoke-test
+        run: |
+          ROW_COUNT=$(cat fixture.sql \
+            | ./target/release/skim -f jsonl ${{ steps.tfilter.outputs.flag }} \
+            | wc -l)
+          echo "Stdin JSONL rows: $ROW_COUNT"
+          EXPECTED=${{ steps.run_jsonl.outputs.rows }}
+          if [ "$ROW_COUNT" != "$EXPECTED" ]; then
+            echo "ERROR: stdin row count ($ROW_COUNT) != file row count ($EXPECTED)"
+            exit 1
+          fi
+
+      # ── RSS assertion ────────────────────────────────────────────────────────
+      - name: Assert peak RSS is within limit
+        run: |
+          LIMIT_MB=${{ inputs.rss_limit_mb }}
+
+          extract_rss_mb() {
+            # /usr/bin/time -v emits "Maximum resident set size (kbytes): NNNN"
+            grep "Maximum resident set size" "$1" \
+              | awk '{print $NF}' \
+              | awk '{printf "%d", $1 / 1024}'
+          }
+
+          JSONL_MB=$(extract_rss_mb time_jsonl.txt)
+          PARQUET_MB=$(extract_rss_mb time_parquet.txt)
+
+          echo "Peak RSS — JSONL: ${JSONL_MB} MiB, Parquet: ${PARQUET_MB} MiB  (limit: ${LIMIT_MB} MiB)"
+
+          FAILED=0
+          if [ "$JSONL_MB" -gt "$LIMIT_MB" ]; then
+            echo "FAIL: JSONL peak RSS ${JSONL_MB} MiB exceeds limit ${LIMIT_MB} MiB"
+            FAILED=1
+          fi
+          if [ "$PARQUET_MB" -gt "$LIMIT_MB" ]; then
+            echo "FAIL: Parquet peak RSS ${PARQUET_MB} MiB exceeds limit ${LIMIT_MB} MiB"
+            FAILED=1
+          fi
+
+          exit $FAILED
+
+      # ── Upload outputs as artifacts for manual inspection ────────────────────
+      - name: Upload converted outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted-outputs
+          path: |
+            out.jsonl
+            out.json
+            out.csv
+            out.yaml
+            out.toml
+            out.parquet
+            time_jsonl.txt
+            time_parquet.txt
+          retention-days: 3
