@@ -23,7 +23,7 @@ case "$OS" in
     ;;
   *)
     echo "Unsupported OS: $OS. On Windows use:"
-    echo "  irm https://raw.githubusercontent.com/${REPO}/main/scripts/install.ps1 | iex"
+    echo "  irm https://raw.githubusercontent.com/${REPO}/master/scripts/install.ps1 | iex"
     exit 1
     ;;
 esac

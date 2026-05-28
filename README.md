@@ -16,7 +16,7 @@ Stream a MySQL/MariaDB SQL dump and convert `INSERT` rows to JSON, JSONL, CSV, Y
 ### Linux / macOS
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/aodihis/skim/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/aodihis/skim/master/scripts/install.sh | sh
 ```
 
 Installs to `~/.local/bin/skim`. Make sure that directory is in your `PATH`:
@@ -28,7 +28,7 @@ export PATH="$HOME/.local/bin:$PATH"
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/aodihis/skim/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/aodihis/skim/master/scripts/install.ps1 | iex
 ```
 
 Installs to `%USERPROFILE%\.local\bin\skim.exe`.
