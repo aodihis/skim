@@ -1,6 +1,6 @@
 [package]
 name        = "skim"
-version     = "0.1.0"
+version     = "0.1.1"
 edition     = "2021"
 description = "Stream SQL dump files and convert INSERT rows to JSON, JSONL, CSV, YAML, or Parquet"
 license     = "MIT"
