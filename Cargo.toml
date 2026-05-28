@@ -46,3 +46,7 @@ indicatif = "0.18.4"
 
 # Fast byte scanning — https://docs.rs/memchr
 memchr = "2"
+
+[dev-dependencies]
+# Temporary directories for integration tests — https://docs.rs/tempfile
+tempfile = "3"
