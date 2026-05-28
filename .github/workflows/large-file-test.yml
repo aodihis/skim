@@ -7,6 +7,7 @@ on:
       sql_url:
         description: "Direct download URL of the SQL dump file (raw GitHub URL, S3, etc.)"
         required: true
+        default: "https://raw.githubusercontent.com/aodihis/large-sql-test/main/fixture.sql"
         type: string
       table_filter:
         description: "Table name to pass with -t (leave blank to convert all tables)"
