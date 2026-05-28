@@ -63,11 +63,12 @@ jobs:
           fi
 
       # ── Format runs with peak-RSS capture ───────────────────────────────────
+      # --no-progress suppresses the progress bar so ANSI codes don't appear in CI logs.
       - name: Convert → JSONL  (memory profiled)
         id: run_jsonl
         run: |
           /usr/bin/time -v \
-            ./target/release/skim fixture.sql -f jsonl ${{ steps.tfilter.outputs.flag }} -o out.jsonl \
+            ./target/release/skim --no-progress fixture.sql -f jsonl ${{ steps.tfilter.outputs.flag }} -o out.jsonl \
             2> time_jsonl.txt
           cat time_jsonl.txt
           ROW_COUNT=$(wc -l < out.jsonl)
@@ -76,28 +77,28 @@ jobs:
 
       - name: Convert → JSON
         run: |
-          ./target/release/skim fixture.sql -f json ${{ steps.tfilter.outputs.flag }} -o out.json
+          ./target/release/skim --no-progress fixture.sql -f json ${{ steps.tfilter.outputs.flag }} -o out.json
           echo "JSON file size: $(du -sh out.json | cut -f1)"
 
       - name: Convert → CSV
         run: |
-          ./target/release/skim fixture.sql -f csv ${{ steps.tfilter.outputs.flag }} -o out.csv
-          echo "CSV rows (incl. header): $(wc -l < out.csv)"
+          ./target/release/skim --no-progress fixture.sql -f csv ${{ steps.tfilter.outputs.flag }} -o out.csv
+          echo "CSV file size: $(du -sh out.csv | cut -f1)"
 
       - name: Convert → YAML
         run: |
-          ./target/release/skim fixture.sql -f yaml ${{ steps.tfilter.outputs.flag }} -o out.yaml
+          ./target/release/skim --no-progress fixture.sql -f yaml ${{ steps.tfilter.outputs.flag }} -o out.yaml
           echo "YAML file size: $(du -sh out.yaml | cut -f1)"
 
       - name: Convert → TOML
         run: |
-          ./target/release/skim fixture.sql -f toml ${{ steps.tfilter.outputs.flag }} -o out.toml
+          ./target/release/skim --no-progress fixture.sql -f toml ${{ steps.tfilter.outputs.flag }} -o out.toml
           echo "TOML file size: $(du -sh out.toml | cut -f1)"
 
       - name: Convert → Parquet
         run: |
           /usr/bin/time -v \
-            ./target/release/skim fixture.sql -o out.parquet ${{ steps.tfilter.outputs.flag }} \
+            ./target/release/skim --no-progress fixture.sql -o out.parquet ${{ steps.tfilter.outputs.flag }} \
             2> time_parquet.txt
           cat time_parquet.txt
           echo "Parquet file size: $(du -sh out.parquet | cut -f1)"
@@ -150,48 +151,69 @@ jobs:
                   print(f"JSON ERROR: {e}")
                   sys.exit(1)
 
-          if not isinstance(data, list):
-              print(f"JSON ERROR: top-level value is {type(data).__name__}, expected array")
+          # JSON output is grouped by table: {"table_name": [...rows...], ...}
+          if not isinstance(data, dict):
+              print(f"JSON ERROR: top-level value is {type(data).__name__}, expected object grouped by table")
               sys.exit(1)
 
-          non_objects = [i for i, v in enumerate(data) if not isinstance(v, dict)]
-          if non_objects:
-              print(f"JSON ERROR: {len(non_objects)} non-object entries (first at index {non_objects[0]})")
-              sys.exit(1)
+          errors = 0
+          total_rows = 0
+          for table, rows in data.items():
+              if not isinstance(rows, list):
+                  print(f"JSON ERROR: key {table!r} has value of type {type(rows).__name__}, expected array")
+                  errors += 1
+                  continue
+              non_objects = [i for i, v in enumerate(rows) if not isinstance(v, dict)]
+              if non_objects:
+                  print(f"JSON ERROR: {table!r} has {len(non_objects)} non-object entries (first at index {non_objects[0]})")
+                  errors += 1
+              total_rows += len(rows)
 
-          print(f"JSON OK — array of {len(data)} objects")
+          if errors:
+              sys.exit(1)
+          print(f"JSON OK — {len(data)} table(s), {total_rows} total rows")
           EOF
 
       - name: Validate CSV structure
         run: |
           python3 - <<'EOF'
-          import sys, csv
+          import sys, csv, io
+
+          # CSV output supports multiple tables separated by blank lines.
+          # Each section has its own header; column counts are consistent within a section.
+          with open("out.csv", newline="") as f:
+              content = f.read()
+
+          sections = [s.strip() for s in content.split("\n\n") if s.strip()]
+          if not sections:
+              print("CSV ERROR: file is empty")
+              sys.exit(1)
 
           errors = 0
-          with open("out.csv", newline="") as f:
-              reader = csv.reader(f)
+          total_rows = 0
+          for sec_idx, section in enumerate(sections, 1):
+              reader = csv.reader(io.StringIO(section))
               header = next(reader, None)
-              if header is None:
-                  print("CSV ERROR: file is empty")
-                  sys.exit(1)
-              if not header:
-                  print("CSV ERROR: header row has no columns")
-                  sys.exit(1)
-
+              if header is None or not header:
+                  print(f"CSV ERROR section {sec_idx}: missing or empty header row")
+                  errors += 1
+                  continue
               col_count = len(header)
               row_count = 0
               for i, row in enumerate(reader, 2):
                   row_count += 1
                   if len(row) != col_count:
-                      print(f"CSV ERROR row {i}: expected {col_count} columns, got {len(row)}")
+                      print(f"CSV ERROR section {sec_idx} row {i}: expected {col_count} columns, got {len(row)}")
                       errors += 1
                       if errors >= 10:
                           print("Too many errors, stopping early.")
                           break
+              total_rows += row_count
+              print(f"  Section {sec_idx}: {col_count} columns, {row_count} data rows (header: {header[:3]}{'...' if len(header) > 3 else ''})")
 
           if errors:
               sys.exit(1)
-          print(f"CSV OK — {col_count} columns, {row_count} data rows")
+          print(f"CSV OK — {len(sections)} section(s), {total_rows} total data rows")
           EOF
 
       - name: Validate YAML structure
@@ -288,7 +310,7 @@ jobs:
       - name: Stdin pipe smoke-test
         run: |
           ROW_COUNT=$(cat fixture.sql \
-            | ./target/release/skim -f jsonl ${{ steps.tfilter.outputs.flag }} \
+            | ./target/release/skim --no-progress -f jsonl ${{ steps.tfilter.outputs.flag }} \
             | wc -l)
           echo "Stdin JSONL rows: $ROW_COUNT"
           EXPECTED=${{ steps.run_jsonl.outputs.rows }}
