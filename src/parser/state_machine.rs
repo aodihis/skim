@@ -59,7 +59,7 @@ enum State {
 pub struct StatementExtractor<R: BufRead> {
     reader: R,
     state: State,
-    buf: String,
+    buf: Vec<u8>,
     max_size: usize,
     done: bool,
 }
@@ -69,7 +69,7 @@ impl<R: BufRead> StatementExtractor<R> {
         Self {
             reader,
             state: State::Normal,
-            buf: String::with_capacity(4096),
+            buf: Vec::with_capacity(4096),
             max_size: max_statement_size,
             done: false,
         }
@@ -97,7 +97,7 @@ impl<R: BufRead> Iterator for StatementExtractor<R> {
             if n == 0 {
                 // EOF
                 self.done = true;
-                let stmt = self.buf.trim().to_string();
+                let stmt = String::from_utf8_lossy(&self.buf).trim().to_string();
                 if stmt.is_empty() {
                     return None;
                 }
@@ -161,8 +161,8 @@ impl<R: BufRead> StatementExtractor<R> {
                     }
                     b';' => {
                         // Statement boundary — check for DELIMITER before yielding.
-                        let stmt = self.buf.clone();
-                        self.buf.clear();
+                        let bytes = std::mem::take(&mut self.buf);
+                        let stmt = String::from_utf8_lossy(&bytes).into_owned();
 
                         // Detect `DELIMITER ;;` (or other custom delimiter).
                         let trimmed = stmt.trim();
@@ -325,8 +325,8 @@ impl<R: BufRead> StatementExtractor<R> {
             State::SkipDelimiter { delim } => {
                 let delim = delim.clone();
                 // Accumulate into buf looking for the delimiter sequence.
-                unsafe { self.buf.as_mut_vec().push(b) };
-                if self.buf.ends_with(std::str::from_utf8(&delim).unwrap_or("")) {
+                self.buf.push(b);
+                if self.buf.ends_with(delim.as_slice()) {
                     self.buf.clear();
                     self.state = State::Normal;
                 }
@@ -338,11 +338,7 @@ impl<R: BufRead> StatementExtractor<R> {
     /// Push `b` to the buffer without size checking (used in string/comment
     /// states where we know the content is bounded by the statement size).
     fn push(&mut self, b: u8) {
-        // SAFETY: we accumulate raw bytes into a Vec<u8> and re-interpret as
-        // UTF-8 only when the statement is complete.  Using push(b as char)
-        // would corrupt multi-byte sequences (e.g. Arabic / CJK text) by
-        // treating each byte as an independent Unicode code point.
-        unsafe { self.buf.as_mut_vec().push(b) };
+        self.buf.push(b);
     }
 
     /// Push `b` to the buffer with a size-limit check (used in Normal state).
@@ -354,7 +350,7 @@ impl<R: BufRead> StatementExtractor<R> {
             }
             .into());
         }
-        unsafe { self.buf.as_mut_vec().push(b) };
+        self.buf.push(b);
         Ok(())
     }
 
@@ -362,7 +358,10 @@ impl<R: BufRead> StatementExtractor<R> {
     /// mode for the custom delimiter.  This handles the case where mysqldump
     /// emits `DELIMITER ;;` before stored procedures.
     fn maybe_enter_delimiter_skip(&mut self) {
-        let trimmed = self.buf.trim_start();
+        // DELIMITER is always ASCII and only appears before any string content,
+        // so from_utf8 will succeed here; fall back to ignoring on error.
+        let Ok(s) = std::str::from_utf8(&self.buf) else { return };
+        let trimmed = s.trim_start();
         if trimmed.len() < 10 {
             return;
         }
