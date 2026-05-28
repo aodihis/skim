@@ -88,7 +88,7 @@ fn assert_success(cmd: &mut Command) -> String {
 // ── README example tests ──────────────────────────────────────────────────────
 
 /// README: `skim dump.sql`
-/// Default output is a JSON array written to stdout.
+/// Default output is a JSON object grouped by table name.
 #[test]
 fn default_output_is_json() {
     let dir = tempfile::tempdir().unwrap();
@@ -98,9 +98,10 @@ fn default_output_is_json() {
 
     let parsed: serde_json::Value = serde_json::from_str(&stdout)
         .expect("stdout should be valid JSON");
-    assert!(parsed.is_array(), "expected a JSON array");
-    // Both tables → 6 rows total
-    assert_eq!(parsed.as_array().unwrap().len(), 6);
+    assert!(parsed.is_object(), "expected a JSON object grouped by table");
+    // Both tables present as keys
+    assert_eq!(parsed["users"].as_array().unwrap().len(), 3, "expected 3 users rows");
+    assert_eq!(parsed["orders"].as_array().unwrap().len(), 3, "expected 3 orders rows");
 }
 
 /// README: `skim --format jsonl dump.sql`
@@ -180,7 +181,7 @@ fn table_filter_csv() {
 }
 
 /// README: `skim -t users -t orders dump.sql`
-/// Multiple table filters: JSON array contains rows from both tables.
+/// Multiple table filters: JSON object has both table keys.
 #[test]
 fn multi_table_filter_json() {
     let dir = tempfile::tempdir().unwrap();
@@ -189,11 +190,10 @@ fn multi_table_filter_json() {
     let stdout = assert_success(skim().args(["-t", "users", "-t", "orders", &fixture]));
 
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(
-        parsed.as_array().unwrap().len(),
-        6,
-        "expected 3 users + 3 orders = 6 rows",
-    );
+    assert!(parsed.is_object(), "expected grouped JSON object");
+    let users = parsed["users"].as_array().unwrap();
+    let orders = parsed["orders"].as_array().unwrap();
+    assert_eq!(users.len() + orders.len(), 6, "expected 3 users + 3 orders = 6 rows");
 }
 
 /// README: `skim dump.sql -o output.parquet`
@@ -210,8 +210,7 @@ fn parquet_output() {
     assert!(metadata.len() > 0, "parquet file should not be empty");
 }
 
-/// README: `skim --progress dump.sql -o output.csv`
-/// --progress writes to stderr; file output is unaffected. Exit code 0.
+/// Progress bar is on by default; `--no-progress` disables it. Exit code 0 either way.
 /// Uses -t users to keep a consistent schema (CSV requires uniform column count).
 #[test]
 fn progress_flag_exits_ok() {
@@ -220,10 +219,10 @@ fn progress_flag_exits_ok() {
     let out_path = dir.path().join("output.csv");
 
     assert_success(
-        skim().args(["--progress", "-t", "users", &fixture, "-o", out_path.to_str().unwrap()]),
+        skim().args(["--no-progress", "-t", "users", &fixture, "-o", out_path.to_str().unwrap()]),
     );
 
-    assert!(out_path.exists(), "output.csv should be created even with --progress");
+    assert!(out_path.exists(), "output.csv should be created with --no-progress");
 }
 
 /// README: `skim --format csv --no-header dump.sql`
@@ -333,7 +332,8 @@ fn dialect_postgres() {
     let stdout = assert_success(skim().args(["--dialect", "postgres", &fixture]));
 
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let rows = parsed.as_array().unwrap();
+    assert!(parsed.is_object(), "expected grouped JSON object");
+    let rows = parsed["events"].as_array().unwrap();
     assert_eq!(rows.len(), 2, "expected 2 rows from PG fixture");
 
     // Verify the schema-qualified table name was handled (values are correct)
@@ -351,7 +351,8 @@ fn table_filter_excludes_other_tables() {
     let stdout = assert_success(skim().args(["-t", "users", &fixture]));
 
     let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    let rows = parsed.as_array().unwrap();
+    assert!(parsed.is_object(), "expected grouped JSON object");
+    let rows = parsed["users"].as_array().unwrap();
     assert_eq!(rows.len(), 3, "only users (3 rows) should be included");
     // Every row should have the 'email' field (users column), not 'total' (orders column)
     for row in rows {

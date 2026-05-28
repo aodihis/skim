@@ -323,8 +323,8 @@ impl<R: BufRead> StatementExtractor<R> {
 
             // ── DELIMITER skip (mysqldump stored procedures) ──────────────
             State::SkipDelimiter { delim } => {
-                let delim = delim.clone();
-                // Accumulate into buf looking for the delimiter sequence.
+                // `delim` borrows from the cloned state temporary, not from self,
+                // so mutating self.buf below is safe without an extra clone.
                 self.buf.push(b);
                 if self.buf.ends_with(delim.as_slice()) {
                     self.buf.clear();

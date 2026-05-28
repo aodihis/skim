@@ -53,10 +53,9 @@ pub struct Args {
     #[arg(long)]
     pub no_header: bool,
 
-    /// Show a progress bar on stderr.
-    /// Shows percentage when input is a seekable file; shows row count for stdin.
+    /// Disable the progress bar (shown on stderr by default).
     #[arg(long)]
-    pub progress: bool,
+    pub no_progress: bool,
 
     /// SQL dialect of the dump file: mysql, postgres, or auto.
     /// 'auto' detects the dialect from the dump header comment (default).

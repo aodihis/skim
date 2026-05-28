@@ -10,6 +10,7 @@ use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 
 use super::{Row, Schema, SqlDialect, Value};
+use super::schema::unqualified_name;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -247,13 +248,7 @@ pub fn insert_table_name(sql: &str, dialect: SqlDialect) -> anyhow::Result<Optio
 /// Returns `None` for non-simple-name forms (table functions, sub-queries).
 pub fn table_name_from_object(obj: &TableObject) -> Option<String> {
     match obj {
-        TableObject::TableName(name) => {
-            // ObjectName::to_string() gives "schema.table" or just "table".
-            // Split on '.' and take the last segment, stripping any wrapping quotes.
-            let full = name.to_string();
-            let unqualified = full.split('.').last().unwrap_or(&full);
-            Some(unqualified.trim_matches('"').trim_matches('`').to_string())
-        }
+        TableObject::TableName(name) => Some(unqualified_name(name)),
         _ => None,
     }
 }

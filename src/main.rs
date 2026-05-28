@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
 
     // ── Optional progress bar ─────────────────────────────────────────────────
     let bar;
-    let reader: Box<dyn BufRead> = if args.progress {
+    let reader: Box<dyn BufRead> = if !args.no_progress {
         let b = progress::make_bar(file_len);
         let wrapped = Box::new(progress::ProgressReader::new(raw_reader, b.clone()));
         bar = Some(b);
@@ -150,6 +150,12 @@ fn main() -> anyhow::Result<()> {
         for row in rows {
             row_count += 1;
             writer.write_row(&schema, &row)?;
+            // Keep the spinner message fresh for stdin (no byte progress available).
+            if let Some(b) = &bar {
+                if row_count % 500 == 0 {
+                    b.set_message(format!("{row_count} rows"));
+                }
+            }
         }
     }
 
