@@ -113,10 +113,21 @@ fn main() -> anyhow::Result<()> {
     for stmt_result in extractor {
         let stmt = stmt_result?;
 
+        // Skip past leading comments before deciding whether a statement is
+        // worth parsing. MySQL versioned comments (`/*!40000 ... */`) can
+        // contain dump-control SQL such as `ALTER TABLE ... DISABLE KEYS`
+        // that sqlparser does not support and that exporters should ignore.
+        let effective = skip_leading_comments(&stmt);
+        if effective.is_empty() {
+            continue;
+        }
+
         // CREATE TABLE → adopt schema if the table passes the filter.
-        if let Some(s) = extract_schema(&stmt, dialect)? {
-            if table_matches(&s.table_name, &args.tables) {
-                schema = s;
+        if starts_with_keyword(effective, "CREATE") {
+            if let Some(s) = extract_schema(effective, dialect)? {
+                if table_matches(&s.table_name, &args.tables) {
+                    schema = s;
+                }
             }
             continue;
         }
@@ -126,13 +137,12 @@ fn main() -> anyhow::Result<()> {
         // mysqldump often emits a comment block immediately before INSERT with
         // no semicolon in between, so the comment and INSERT end up in the same
         // extracted statement.
-        let effective = skip_leading_comments(&stmt);
-        if !effective.get(..7).is_some_and(|p| p.eq_ignore_ascii_case("INSERT ")) {
+        if !starts_with_keyword(effective, "INSERT") {
             continue;
         }
 
         // INSERT → check table name against filter.
-        let tname = match insert_table_name(&stmt, dialect)? {
+        let tname = match insert_table_name(effective, dialect)? {
             Some(n) => n,
             None    => continue,
         };
@@ -146,7 +156,7 @@ fn main() -> anyhow::Result<()> {
             header_written = true;
         }
 
-        let rows = extract_rows(&stmt, &schema, dialect)?;
+        let rows = extract_rows(effective, &schema, dialect)?;
         for row in rows {
             row_count += 1;
             writer.write_row(&schema, &row)?;
@@ -212,4 +222,18 @@ fn skip_leading_comments(sql: &str) -> &str {
             return s;
         }
     }
+}
+
+fn starts_with_keyword(sql: &str, keyword: &str) -> bool {
+    let s = sql.trim_start();
+    let Some(prefix) = s.get(..keyword.len()) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(keyword) {
+        return false;
+    }
+    s[keyword.len()..]
+        .chars()
+        .next()
+        .is_none_or(|c| c.is_ascii_whitespace())
 }

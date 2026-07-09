@@ -148,6 +148,36 @@ fn stdin_pipe_jsonl() {
     assert_eq!(lines.len(), 6, "stdin pipe should produce 6 JSONL lines");
 }
 
+#[test]
+fn mysql_versioned_disable_enable_keys_comments_are_ignored() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = write_fixture(
+        &dir,
+        "dump.sql",
+        r#"
+CREATE TABLE `HadithTable` (
+  `id` INT NOT NULL,
+  `text` TEXT
+);
+LOCK TABLES `HadithTable` WRITE;
+/*!40000 ALTER TABLE `HadithTable` DISABLE KEYS */;
+INSERT INTO `HadithTable` VALUES
+  (1,'first'),
+  (2,'second');
+/*!40000 ALTER TABLE `HadithTable` ENABLE KEYS */;
+UNLOCK TABLES;
+"#,
+    );
+
+    let stdout = assert_success(skim().args(["--no-progress", &fixture]));
+
+    let parsed: serde_json::Value = serde_json::from_str(&stdout)
+        .expect("stdout should be valid JSON");
+    let rows = parsed["HadithTable"].as_array().expect("HadithTable rows");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["text"], "first");
+}
+
 /// README: `skim -t users dump.sql -o users.csv`
 /// CSV output for a single table: header row + exactly 3 data rows.
 #[test]
