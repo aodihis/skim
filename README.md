@@ -52,10 +52,28 @@ skim [OPTIONS] [INPUT]
 | `-f, --format <FORMAT>` | Override output format (see formats below). |
 | `-t, --table <TABLE>` | Only convert rows from this table. Repeatable. |
 | `--no-header` | Suppress the CSV header row. |
-| `--progress` | Show a progress bar on stderr. |
+| `--no-progress` | Disable the progress bar shown on stderr by default. |
+| `--dialect <DIALECT>` | SQL dialect: `mysql`, `postgres`, or `auto` (default: `auto`). |
 | `--infer-rows <N>` | Rows to buffer for Parquet schema inference when no `CREATE TABLE` is present (default: 1000). |
 | `--batch-size <N>` | Rows per Arrow RecordBatch for Parquet output (default: 10000). |
 | `--max-statement-size <BYTES>` | Abort if a single SQL statement exceeds this size (default: 256 MiB). |
+
+## Performance debugging
+
+Debug builds can print timing and throughput metrics when `SKIM_DEBUG` is set:
+
+```sh
+SKIM_DEBUG=1 cargo run -- dump.sql -o output.json
+```
+
+PowerShell:
+
+```powershell
+$env:SKIM_DEBUG = "1"
+cargo run -- .\dump.sql -o output.json
+```
+
+The debug summary is written to stderr and is compiled out for release builds.
 
 ## Output formats
 
@@ -93,10 +111,10 @@ Filter multiple tables, output to stdout as JSON:
 skim -t users -t orders dump.sql
 ```
 
-Write Parquet with a progress bar:
+Write Parquet and hide the progress bar:
 
 ```sh
-skim --progress dump.sql -o output.parquet
+skim --no-progress dump.sql -o output.parquet
 ```
 
 Pipe through `jq`:

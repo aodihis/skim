@@ -12,6 +12,9 @@ use std::fs;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+const README: &str = include_str!("../README.md");
+const AGENTS: &str = include_str!("../AGENTS.md");
+
 // Cargo sets this env var to the path of the compiled binary for integration tests.
 fn skim() -> Command {
     Command::new(env!("CARGO_BIN_EXE_skim"))
@@ -87,6 +90,53 @@ fn assert_success(cmd: &mut Command) -> String {
 
 // ── README example tests ──────────────────────────────────────────────────────
 
+#[test]
+fn readme_documents_supported_cli_flags() {
+    let help = assert_success(skim().arg("--help"));
+
+    let documented_flags = [
+        "--output",
+        "--format",
+        "--table",
+        "--no-header",
+        "--no-progress",
+        "--dialect",
+        "--infer-rows",
+        "--batch-size",
+        "--max-statement-size",
+    ];
+
+    for flag in documented_flags {
+        assert!(
+            README.contains(flag),
+            "README should document CLI flag {flag}",
+        );
+        assert!(help.contains(flag), "CLI help should expose {flag}");
+    }
+
+    assert!(
+        !README.contains("--progress"),
+        "README must not document unsupported --progress flag; use --no-progress",
+    );
+}
+
+#[test]
+fn agents_file_documents_test_author_implementer_workflow() {
+    for required in [
+        "Test Author",
+        "Implementer",
+        "Reviewer",
+        "tests/readme_examples.rs",
+        "cargo test",
+        "cargo check --release",
+    ] {
+        assert!(
+            AGENTS.contains(required),
+            "AGENTS.md should include guidance for {required}",
+        );
+    }
+}
+
 /// README: `skim dump.sql`
 /// Default output is a JSON object grouped by table name.
 #[test]
@@ -146,6 +196,50 @@ fn stdin_pipe_jsonl() {
 
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(lines.len(), 6, "stdin pipe should produce 6 JSONL lines");
+}
+
+#[cfg(debug_assertions)]
+#[test]
+fn debug_env_prints_performance_summary() {
+    let mut child = skim()
+        .args(["--no-progress", "-"])
+        .env("SKIM_DEBUG", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn skim");
+
+    child.stdin.take().unwrap().write_all(MYSQL_FIXTURE.as_bytes()).unwrap();
+
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "skim failed\nstderr: {stderr}");
+    assert!(stderr.contains("[skim debug]"));
+    assert!(stderr.contains("row_parse="));
+    assert!(stderr.contains("rows/s="));
+}
+
+#[test]
+fn debug_summary_hidden_without_env() {
+    let mut child = skim()
+        .args(["--no-progress", "-"])
+        .env_remove("SKIM_DEBUG")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn skim");
+
+    child.stdin.take().unwrap().write_all(MYSQL_FIXTURE.as_bytes()).unwrap();
+
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "skim failed\nstderr: {stderr}");
+    assert!(
+        !stderr.contains("[skim debug]"),
+        "debug output should be hidden without SKIM_DEBUG, got: {stderr}",
+    );
 }
 
 #[test]
@@ -226,7 +320,7 @@ fn multi_table_filter_json() {
     assert_eq!(users.len() + orders.len(), 6, "expected 3 users + 3 orders = 6 rows");
 }
 
-/// README: `skim dump.sql -o output.parquet`
+/// README: `skim --no-progress dump.sql -o output.parquet`
 /// Parquet file is created and non-empty.
 #[test]
 fn parquet_output() {
@@ -234,7 +328,7 @@ fn parquet_output() {
     let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
     let out_path = dir.path().join("output.parquet");
 
-    assert_success(skim().args([&fixture, "-o", out_path.to_str().unwrap()]));
+    assert_success(skim().args(["--no-progress", &fixture, "-o", out_path.to_str().unwrap()]));
 
     let metadata = fs::metadata(&out_path).expect("output.parquet not created");
     assert!(metadata.len() > 0, "parquet file should not be empty");

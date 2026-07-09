@@ -1,4 +1,5 @@
 mod cli;
+mod debug_stats;
 mod error;
 mod parser;
 mod progress;
@@ -12,6 +13,7 @@ use std::{
 use clap::Parser;
 
 use cli::{Args, CliDialect, OutputFormat};
+use debug_stats::DebugStats;
 use error::ConvertError;
 use parser::{
     Schema, SqlDialect,
@@ -109,9 +111,11 @@ fn main() -> anyhow::Result<()> {
     let mut schema = Schema { table_name: String::new(), columns: vec![] };
     let mut header_written = false;
     let mut row_count = 0u64;
+    let mut debug = DebugStats::new(file_len);
 
     for stmt_result in extractor {
         let stmt = stmt_result?;
+        debug.record_statement(stmt.len());
 
         // Skip past leading comments before deciding whether a statement is
         // worth parsing. MySQL versioned comments (`/*!40000 ... */`) can
@@ -119,12 +123,17 @@ fn main() -> anyhow::Result<()> {
         // that sqlparser does not support and that exporters should ignore.
         let effective = skip_leading_comments(&stmt);
         if effective.is_empty() {
+            debug.record_skipped_statement();
             continue;
         }
 
         // CREATE TABLE → adopt schema if the table passes the filter.
         if starts_with_keyword(effective, "CREATE") {
-            if let Some(s) = extract_schema(effective, dialect)? {
+            debug.record_create_statement();
+            let timer = debug.timer();
+            let extracted_schema = extract_schema(effective, dialect)?;
+            debug.add_schema_parse(timer.elapsed());
+            if let Some(s) = extracted_schema {
                 if table_matches(&s.table_name, &args.tables) {
                     schema = s;
                 }
@@ -138,11 +147,16 @@ fn main() -> anyhow::Result<()> {
         // no semicolon in between, so the comment and INSERT end up in the same
         // extracted statement.
         if !starts_with_keyword(effective, "INSERT") {
+            debug.record_skipped_statement();
             continue;
         }
+        debug.record_insert_statement();
 
         // INSERT → check table name against filter.
-        let tname = match insert_table_name(effective, dialect)? {
+        let timer = debug.timer();
+        let parsed_table_name = insert_table_name(effective, dialect)?;
+        debug.add_table_parse(timer.elapsed());
+        let tname = match parsed_table_name {
             Some(n) => n,
             None    => continue,
         };
@@ -156,7 +170,12 @@ fn main() -> anyhow::Result<()> {
             header_written = true;
         }
 
+        let timer = debug.timer();
         let rows = extract_rows(effective, &schema, dialect)?;
+        debug.add_row_parse(timer.elapsed());
+        debug.record_rows(rows.len());
+
+        let timer = debug.timer();
         for row in rows {
             row_count += 1;
             writer.write_row(&schema, &row)?;
@@ -167,17 +186,21 @@ fn main() -> anyhow::Result<()> {
                 }
             }
         }
+        debug.add_row_write(timer.elapsed());
     }
 
     // Ensure write_header is always called (required by JSON/CSV/Parquet writers).
     if !header_written {
         writer.write_header(&schema)?;
     }
+    let timer = debug.timer();
     writer.finish()?;
+    debug.add_final_write(timer.elapsed());
 
     if let Some(b) = bar {
         b.finish_with_message(format!("{row_count} row(s)"));
     }
+    debug.print_summary();
 
     Ok(())
 }
