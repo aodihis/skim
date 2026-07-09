@@ -215,7 +215,8 @@ fn debug_env_prints_performance_summary() {
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     assert!(out.status.success(), "skim failed\nstderr: {stderr}");
-    assert!(stderr.contains("[skim debug]"));
+    assert!(stderr.contains("[skim debug] enabled by SKIM_DEBUG=1"));
+    assert!(stderr.contains("[skim debug] parsing insert statement="));
     assert!(stderr.contains("row_parse="));
     assert!(stderr.contains("rows/s="));
 }

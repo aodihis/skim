@@ -19,7 +19,7 @@ use parser::{
     Schema, SqlDialect,
     schema::extract_schema,
     state_machine::StatementExtractor,
-    value_parser::{extract_rows, insert_table_name},
+    value_parser::extract_insert_rows,
 };
 use writer::{
     Writer,
@@ -151,29 +151,27 @@ fn main() -> anyhow::Result<()> {
             continue;
         }
         debug.record_insert_statement();
+        debug.print_insert_parse_start(effective.len());
 
-        // INSERT → check table name against filter.
         let timer = debug.timer();
-        let parsed_table_name = insert_table_name(effective, dialect)?;
-        debug.add_table_parse(timer.elapsed());
-        let tname = match parsed_table_name {
-            Some(n) => n,
-            None    => continue,
+        let Some(insert) = extract_insert_rows(effective, &schema, dialect)? else {
+            continue;
+        };
+        debug.add_row_parse(timer.elapsed());
+        let Some(tname) = insert.table_name else {
+            continue;
         };
         if !table_matches(&tname, &args.tables) {
             continue;
         }
+        let rows = insert.rows;
+        debug.record_rows(rows.len());
 
         // First matching INSERT: write the header once.
         if !header_written {
             writer.write_header(&schema)?;
             header_written = true;
         }
-
-        let timer = debug.timer();
-        let rows = extract_rows(effective, &schema, dialect)?;
-        debug.add_row_parse(timer.elapsed());
-        debug.record_rows(rows.len());
 
         let timer = debug.timer();
         for row in rows {

@@ -13,6 +13,7 @@ mod imp {
     pub struct DebugStats {
         enabled: bool,
         started_at: Instant,
+        last_progress_at: Instant,
         file_len: Option<u64>,
         statements: u64,
         create_statements: u64,
@@ -22,7 +23,6 @@ mod imp {
         statement_bytes: u64,
         max_statement_bytes: usize,
         schema_parse: Duration,
-        table_parse: Duration,
         row_parse: Duration,
         row_write: Duration,
         final_write: Duration,
@@ -34,9 +34,19 @@ mod imp {
 
     impl DebugStats {
         pub fn new(file_len: Option<u64>) -> Self {
+            let enabled = debug_enabled();
+            let started_at = Instant::now();
+            if enabled {
+                eprintln!("[skim debug] enabled by {DEBUG_ENV}=1 (debug build only)");
+                if let Some(file_len) = file_len {
+                    eprintln!("[skim debug] input={} MiB", fmt_mib(file_len));
+                }
+            }
+
             Self {
-                enabled: debug_enabled(),
-                started_at: Instant::now(),
+                enabled,
+                started_at,
+                last_progress_at: started_at,
                 file_len,
                 statements: 0,
                 create_statements: 0,
@@ -46,7 +56,6 @@ mod imp {
                 statement_bytes: 0,
                 max_statement_bytes: 0,
                 schema_parse: Duration::ZERO,
-                table_parse: Duration::ZERO,
                 row_parse: Duration::ZERO,
                 row_write: Duration::ZERO,
                 final_write: Duration::ZERO,
@@ -89,18 +98,24 @@ mod imp {
         pub fn record_rows(&mut self, count: usize) {
             if self.enabled {
                 self.rows += count as u64;
+                self.maybe_print_progress();
+            }
+        }
+
+        pub fn print_insert_parse_start(&self, statement_bytes: usize) {
+            if self.enabled {
+                eprintln!(
+                    "[skim debug] parsing insert statement={} MiB statements={} rows={}",
+                    fmt_mib(statement_bytes as u64),
+                    self.statements,
+                    self.rows,
+                );
             }
         }
 
         pub fn add_schema_parse(&mut self, elapsed: Duration) {
             if self.enabled {
                 self.schema_parse += elapsed;
-            }
-        }
-
-        pub fn add_table_parse(&mut self, elapsed: Duration) {
-            if self.enabled {
-                self.table_parse += elapsed;
             }
         }
 
@@ -128,16 +143,12 @@ mod imp {
             }
 
             let total = self.started_at.elapsed();
-            let measured = self.schema_parse
-                + self.table_parse
-                + self.row_parse
-                + self.row_write
-                + self.final_write;
+            let measured =
+                self.schema_parse + self.row_parse + self.row_write + self.final_write;
             let other = total.saturating_sub(measured);
 
-            eprintln!("[skim debug] enabled by {DEBUG_ENV}=1 (debug build only)");
             eprintln!(
-                "[skim debug] total={} rows={} rows/s={:.2}",
+                "[skim debug] summary total={} rows={} rows/s={:.2}",
                 fmt_duration(total),
                 self.rows,
                 rate(self.rows, total),
@@ -159,13 +170,33 @@ mod imp {
                 fmt_mib(self.max_statement_bytes as u64),
             );
             eprintln!(
-                "[skim debug] timings schema_parse={} table_parse={} row_parse={} row_write={} final_write={} other={}",
+                "[skim debug] timings schema_parse={} row_parse={} row_write={} final_write={} other={}",
                 fmt_duration(self.schema_parse),
-                fmt_duration(self.table_parse),
                 fmt_duration(self.row_parse),
                 fmt_duration(self.row_write),
                 fmt_duration(self.final_write),
                 fmt_duration(other),
+            );
+        }
+
+        fn maybe_print_progress(&mut self) {
+            if !self.enabled {
+                return;
+            }
+            let now = Instant::now();
+            if now.duration_since(self.last_progress_at) < Duration::from_secs(5) {
+                return;
+            }
+            self.last_progress_at = now;
+            let elapsed = self.started_at.elapsed();
+            eprintln!(
+                "[skim debug] progress elapsed={} rows={} rows/s={:.2} statements={} insert={} parsed={} MiB",
+                fmt_duration(elapsed),
+                self.rows,
+                rate(self.rows, elapsed),
+                self.statements,
+                self.insert_statements,
+                fmt_mib(self.statement_bytes),
             );
         }
     }
@@ -238,8 +269,8 @@ mod imp {
         pub fn record_insert_statement(&mut self) {}
         pub fn record_skipped_statement(&mut self) {}
         pub fn record_rows(&mut self, _count: usize) {}
+        pub fn print_insert_parse_start(&self, _statement_bytes: usize) {}
         pub fn add_schema_parse(&mut self, _elapsed: Duration) {}
-        pub fn add_table_parse(&mut self, _elapsed: Duration) {}
         pub fn add_row_parse(&mut self, _elapsed: Duration) {}
         pub fn add_row_write(&mut self, _elapsed: Duration) {}
         pub fn add_final_write(&mut self, _elapsed: Duration) {}

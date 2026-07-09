@@ -1,7 +1,7 @@
 //! Streaming SQL statement extractor.
 //!
-//! Reads an input byte-by-byte (via `BufRead`) and yields one complete SQL
-//! statement (terminated by `;`) per `Iterator::next()` call.  The internal
+//! Reads input through `BufRead` and yields one complete SQL statement
+//! (terminated by `;`) per `Iterator::next()` call.  The internal
 //! buffer never grows beyond a single statement, so memory usage is
 //! O(max_statement_size) regardless of total file size.
 //!
@@ -105,21 +105,18 @@ impl<R: BufRead> Iterator for StatementExtractor<R> {
                 return Some(Ok(stmt));
             }
 
-            // Process each byte of the line.
-            for byte in line.bytes() {
-                if let Some(stmt) = self.process_byte(byte) {
-                    match stmt {
-                        Ok(s) => {
-                            let trimmed = s.trim().to_string();
-                            if !trimmed.is_empty() {
-                                return Some(Ok(trimmed));
-                            }
-                            // blank statement — keep going
+            if let Some(stmt) = self.process_bytes(line.as_bytes()) {
+                match stmt {
+                    Ok(s) => {
+                        let trimmed = s.trim().to_string();
+                        if !trimmed.is_empty() {
+                            return Some(Ok(trimmed));
                         }
-                        Err(e) => {
-                            self.done = true;
-                            return Some(Err(e));
-                        }
+                        // blank statement — keep going
+                    }
+                    Err(e) => {
+                        self.done = true;
+                        return Some(Err(e));
                     }
                 }
             }
@@ -128,6 +125,142 @@ impl<R: BufRead> Iterator for StatementExtractor<R> {
 }
 
 impl<R: BufRead> StatementExtractor<R> {
+    /// Process a line/slice in chunks.  The state machine still transitions on
+    /// individual SQL syntax bytes, but long runs of ordinary SQL text and
+    /// quoted string content are copied in one go.
+    fn process_bytes(&mut self, bytes: &[u8]) -> Option<anyhow::Result<String>> {
+        let mut i = 0;
+        while i < bytes.len() {
+            match self.state {
+                State::Normal => {
+                    let rest = &bytes[i..];
+                    let special = rest.iter().position(|b| is_normal_special(*b));
+                    match special {
+                        Some(0) => {
+                            i += 1;
+                            if let Some(stmt) = self.process_byte(rest[0]) {
+                                return Some(stmt);
+                            }
+                        }
+                        Some(pos) => {
+                            if let Err(e) = self.push_slice_checked(&rest[..pos]) {
+                                return Some(Err(e));
+                            }
+                            self.maybe_enter_delimiter_skip();
+                            i += pos;
+                        }
+                        None => {
+                            if let Err(e) = self.push_slice_checked(rest) {
+                                return Some(Err(e));
+                            }
+                            self.maybe_enter_delimiter_skip();
+                            return None;
+                        }
+                    }
+                }
+
+                State::InSingleQuote => {
+                    let rest = &bytes[i..];
+                    let special = rest.iter().position(|b| *b == b'\\' || *b == b'\'');
+                    match special {
+                        Some(0) => {
+                            let b = rest[0];
+                            self.push(b);
+                            i += 1;
+                            if b == b'\\' {
+                                if i < bytes.len() {
+                                    self.push(bytes[i]);
+                                    i += 1;
+                                } else {
+                                    self.state = State::InSingleQuoteEscape;
+                                }
+                            } else {
+                                self.state = State::Normal;
+                            }
+                        }
+                        Some(pos) => {
+                            self.push_slice(&rest[..pos]);
+                            i += pos;
+                        }
+                        None => {
+                            self.push_slice(rest);
+                            return None;
+                        }
+                    }
+                }
+
+                State::InDoubleQuote => {
+                    let rest = &bytes[i..];
+                    let special = rest.iter().position(|b| *b == b'\\' || *b == b'"');
+                    match special {
+                        Some(0) => {
+                            let b = rest[0];
+                            self.push(b);
+                            i += 1;
+                            if b == b'\\' {
+                                if i < bytes.len() {
+                                    self.push(bytes[i]);
+                                    i += 1;
+                                } else {
+                                    self.state = State::InDoubleQuoteEscape;
+                                }
+                            } else {
+                                self.state = State::Normal;
+                            }
+                        }
+                        Some(pos) => {
+                            self.push_slice(&rest[..pos]);
+                            i += pos;
+                        }
+                        None => {
+                            self.push_slice(rest);
+                            return None;
+                        }
+                    }
+                }
+
+                State::InBacktick => {
+                    let rest = &bytes[i..];
+                    match rest.iter().position(|b| *b == b'`') {
+                        Some(pos) => {
+                            self.push_slice(&rest[..=pos]);
+                            self.state = State::Normal;
+                            i += pos + 1;
+                        }
+                        None => {
+                            self.push_slice(rest);
+                            return None;
+                        }
+                    }
+                }
+
+                State::InLineComment => {
+                    let rest = &bytes[i..];
+                    match rest.iter().position(|b| *b == b'\n') {
+                        Some(pos) => {
+                            self.push_slice(&rest[..=pos]);
+                            self.state = State::Normal;
+                            i += pos + 1;
+                        }
+                        None => {
+                            self.push_slice(rest);
+                            return None;
+                        }
+                    }
+                }
+
+                _ => {
+                    let b = bytes[i];
+                    i += 1;
+                    if let Some(stmt) = self.process_byte(b) {
+                        return Some(stmt);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Process a single byte.  Returns `Some(Ok(stmt))` when a complete
     /// statement has been accumulated, `Some(Err(_))` on error, or `None`
     /// when the byte was consumed without completing a statement.
@@ -341,6 +474,10 @@ impl<R: BufRead> StatementExtractor<R> {
         self.buf.push(b);
     }
 
+    fn push_slice(&mut self, bytes: &[u8]) {
+        self.buf.extend_from_slice(bytes);
+    }
+
     /// Push `b` to the buffer with a size-limit check (used in Normal state).
     fn push_checked(&mut self, b: u8) -> anyhow::Result<()> {
         if self.buf.len() >= self.max_size {
@@ -351,6 +488,18 @@ impl<R: BufRead> StatementExtractor<R> {
             .into());
         }
         self.buf.push(b);
+        Ok(())
+    }
+
+    fn push_slice_checked(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        if self.buf.len() + bytes.len() > self.max_size {
+            return Err(ConvertError::StatementTooLarge {
+                max_bytes: self.max_size,
+                actual_bytes: self.buf.len() + bytes.len(),
+            }
+            .into());
+        }
+        self.buf.extend_from_slice(bytes);
         Ok(())
     }
 
@@ -376,6 +525,10 @@ impl<R: BufRead> StatementExtractor<R> {
             self.buf.clear();
         }
     }
+}
+
+fn is_normal_special(b: u8) -> bool {
+    matches!(b, b'\'' | b'"' | b'`' | b'-' | b'/' | b';')
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -411,6 +564,13 @@ mod tests {
     fn semicolon_inside_string() {
         let stmts = extract("INSERT INTO t VALUES ('hello; world');");
         assert_eq!(stmts.len(), 1, "semicolon inside string must not split statement");
+    }
+
+    #[test]
+    fn arabic_text_with_semicolon_inside_string() {
+        let stmts = extract("INSERT INTO t VALUES ('باب العلم؛ ثم المزيد; داخل النص');");
+        assert_eq!(stmts.len(), 1, "Arabic text inside string must stay intact");
+        assert!(stmts[0].contains("باب العلم"));
     }
 
     #[test]

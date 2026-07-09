@@ -4,7 +4,7 @@
 //! - sqlparser AST: <https://docs.rs/sqlparser/latest/sqlparser/ast/index.html>
 //! - Parser entry point: <https://docs.rs/sqlparser/latest/sqlparser/parser/struct.Parser.html#method.parse_sql>
 
-use sqlparser::ast::{Expr, SetExpr, Statement, TableObject, UnaryOperator};
+use sqlparser::ast::{Expr, Insert, SetExpr, Statement, TableObject, UnaryOperator};
 use sqlparser::ast::Value as SqlValue;
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
@@ -13,6 +13,12 @@ use super::{Row, Schema, SqlDialect, Value};
 use super::schema::unqualified_name;
 
 // ── Public API ────────────────────────────────────────────────────────────────
+
+/// Parsed data from a single `INSERT` statement.
+pub struct ParsedInsertRows {
+    pub table_name: Option<String>,
+    pub rows: Vec<Row>,
+}
 
 /// Parse a single complete SQL statement string.
 ///
@@ -24,22 +30,29 @@ use super::schema::unqualified_name;
 /// does **not** list column names (e.g. `INSERT INTO t VALUES (1, 2, 3)`).
 /// Pass a schema with empty `columns` if you have no schema yet — the
 /// function will skip the column-count check.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn extract_rows(sql: &str, schema: &Schema, dialect: SqlDialect) -> anyhow::Result<Vec<Row>> {
-    let stmts = match dialect {
-        SqlDialect::Mysql    => Parser::parse_sql(&MySqlDialect {},    sql)?,
-        SqlDialect::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql)?,
-    };
+    Ok(extract_insert_rows(sql, schema, dialect)?
+        .map(|insert| insert.rows)
+        .unwrap_or_default())
+}
 
-    // The state machine yields one statement at a time, so stmts has ≤ 1 element.
-    let Some(stmt) = stmts.into_iter().next() else {
-        return Ok(vec![]);
+/// Parse one SQL statement and return both the target table name and rows when
+/// it is an `INSERT INTO ... VALUES ...` statement.
+pub fn extract_insert_rows(
+    sql: &str,
+    schema: &Schema,
+    dialect: SqlDialect,
+) -> anyhow::Result<Option<ParsedInsertRows>> {
+    let Some(insert) = parse_insert(sql, dialect)? else {
+        return Ok(None);
     };
+    let table_name = table_name_from_object(&insert.table);
+    let rows = rows_from_insert(insert, schema)?;
+    Ok(Some(ParsedInsertRows { table_name, rows }))
+}
 
-    // We only handle INSERT; everything else is silently ignored.
-    let Statement::Insert(insert) = stmt else {
-        return Ok(vec![]);
-    };
-
+fn rows_from_insert(insert: Insert, schema: &Schema) -> anyhow::Result<Vec<Row>> {
     // Expected column count: from the INSERT column list, or from the schema.
     let expected_cols = if !insert.columns.is_empty() {
         insert.columns.len()
@@ -233,14 +246,30 @@ fn decode_hex(s: &str) -> Vec<u8> {
 ///
 /// Used by the main pipeline to filter statements by table name before
 /// doing the full row-extraction parse.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn insert_table_name(sql: &str, dialect: SqlDialect) -> anyhow::Result<Option<String>> {
+    let Some(insert) = parse_insert(sql, dialect)? else {
+        return Ok(None);
+    };
+    Ok(table_name_from_object(&insert.table))
+}
+
+fn parse_insert(sql: &str, dialect: SqlDialect) -> anyhow::Result<Option<Insert>> {
     let stmts = match dialect {
         SqlDialect::Mysql    => Parser::parse_sql(&MySqlDialect {},    sql)?,
         SqlDialect::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql)?,
     };
-    let Some(stmt) = stmts.into_iter().next() else { return Ok(None); };
-    let Statement::Insert(insert) = stmt else { return Ok(None); };
-    Ok(table_name_from_object(&insert.table))
+
+    // The state machine yields one statement at a time, so stmts has ≤ 1 element.
+    let Some(stmt) = stmts.into_iter().next() else {
+        return Ok(None);
+    };
+
+    let Statement::Insert(insert) = stmt else {
+        return Ok(None);
+    };
+
+    Ok(Some(insert))
 }
 
 /// Extract the unqualified table name from a `TableObject`.
@@ -296,6 +325,19 @@ mod tests {
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[2].values[0], Value::Integer(3));
         assert_eq!(rows[2].values[1], Value::Text("z".into()));
+    }
+
+    #[test]
+    fn extract_insert_rows_returns_table_and_rows() {
+        let sql = "INSERT INTO `users` (id, name) VALUES (1, 'Alice'), (2, 'Bob')";
+        let parsed = extract_insert_rows(sql, &no_schema(), SqlDialect::Mysql)
+            .unwrap()
+            .expect("expected insert rows");
+
+        assert_eq!(parsed.table_name.as_deref(), Some("users"));
+        assert_eq!(parsed.rows.len(), 2);
+        assert_eq!(parsed.rows[0].values[1], Value::Text("Alice".into()));
+        assert_eq!(parsed.rows[1].values[0], Value::Integer(2));
     }
 
     // ── Value types ─────────────────────────────────────────────────────────
