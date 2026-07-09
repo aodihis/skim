@@ -18,6 +18,8 @@ mod imp {
         statements: u64,
         create_statements: u64,
         insert_statements: u64,
+        fast_insert_statements: u64,
+        sqlparser_insert_statements: u64,
         skipped_statements: u64,
         rows: u64,
         statement_bytes: u64,
@@ -51,6 +53,8 @@ mod imp {
                 statements: 0,
                 create_statements: 0,
                 insert_statements: 0,
+                fast_insert_statements: 0,
+                sqlparser_insert_statements: 0,
                 skipped_statements: 0,
                 rows: 0,
                 statement_bytes: 0,
@@ -86,6 +90,16 @@ mod imp {
         pub fn record_insert_statement(&mut self) {
             if self.enabled {
                 self.insert_statements += 1;
+            }
+        }
+
+        pub fn record_insert_parser(&mut self, used_fast_path: bool) {
+            if self.enabled {
+                if used_fast_path {
+                    self.fast_insert_statements += 1;
+                } else {
+                    self.sqlparser_insert_statements += 1;
+                }
             }
         }
 
@@ -161,10 +175,12 @@ mod imp {
                 );
             }
             eprintln!(
-                "[skim debug] statements total={} create={} insert={} skipped={} bytes={} MiB max_statement={} MiB",
+                "[skim debug] statements total={} create={} insert={} fast_insert={} sqlparser_insert={} skipped={} bytes={} MiB max_statement={} MiB",
                 self.statements,
                 self.create_statements,
                 self.insert_statements,
+                self.fast_insert_statements,
+                self.sqlparser_insert_statements,
                 self.skipped_statements,
                 fmt_mib(self.statement_bytes),
                 fmt_mib(self.max_statement_bytes as u64),
@@ -190,12 +206,14 @@ mod imp {
             self.last_progress_at = now;
             let elapsed = self.started_at.elapsed();
             eprintln!(
-                "[skim debug] progress elapsed={} rows={} rows/s={:.2} statements={} insert={} parsed={} MiB",
+                "[skim debug] progress elapsed={} rows={} rows/s={:.2} statements={} insert={} fast_insert={} sqlparser_insert={} parsed={} MiB",
                 fmt_duration(elapsed),
                 self.rows,
                 rate(self.rows, elapsed),
                 self.statements,
                 self.insert_statements,
+                self.fast_insert_statements,
+                self.sqlparser_insert_statements,
                 fmt_mib(self.statement_bytes),
             );
         }
@@ -267,6 +285,7 @@ mod imp {
         pub fn record_statement(&mut self, _bytes: usize) {}
         pub fn record_create_statement(&mut self) {}
         pub fn record_insert_statement(&mut self) {}
+        pub fn record_insert_parser(&mut self, _used_fast_path: bool) {}
         pub fn record_skipped_statement(&mut self) {}
         pub fn record_rows(&mut self, _count: usize) {}
         pub fn print_insert_parse_start(&self, _statement_bytes: usize) {}

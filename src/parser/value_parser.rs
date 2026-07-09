@@ -4,6 +4,7 @@
 //! - sqlparser AST: <https://docs.rs/sqlparser/latest/sqlparser/ast/index.html>
 //! - Parser entry point: <https://docs.rs/sqlparser/latest/sqlparser/parser/struct.Parser.html#method.parse_sql>
 
+use memchr::memchr2;
 use sqlparser::ast::{Expr, Insert, SetExpr, Statement, TableObject, UnaryOperator};
 use sqlparser::ast::Value as SqlValue;
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
@@ -18,6 +19,7 @@ use super::schema::unqualified_name;
 pub struct ParsedInsertRows {
     pub table_name: Option<String>,
     pub rows: Vec<Row>,
+    pub used_fast_path: bool,
 }
 
 /// Parse a single complete SQL statement string.
@@ -44,12 +46,29 @@ pub fn extract_insert_rows(
     schema: &Schema,
     dialect: SqlDialect,
 ) -> anyhow::Result<Option<ParsedInsertRows>> {
+    if dialect == SqlDialect::Mysql {
+        if let Some(parsed) = parse_mysql_insert_fast(sql, schema)? {
+            return Ok(Some(parsed));
+        }
+    }
+
     let Some(insert) = parse_insert(sql, dialect)? else {
         return Ok(None);
     };
     let table_name = table_name_from_object(&insert.table);
     let rows = rows_from_insert(insert, schema)?;
-    Ok(Some(ParsedInsertRows { table_name, rows }))
+    Ok(Some(ParsedInsertRows {
+        table_name,
+        rows,
+        used_fast_path: false,
+    }))
+}
+
+/// Parse one SQL statement into a `sqlparser` INSERT AST and immediately drop
+/// it. Used by performance profiling to isolate AST construction cost from row
+/// conversion and output writing.
+pub fn parse_insert_ast_only(sql: &str, dialect: SqlDialect) -> anyhow::Result<bool> {
+    Ok(parse_insert(sql, dialect)?.is_some())
 }
 
 fn rows_from_insert(insert: Insert, schema: &Schema) -> anyhow::Result<Vec<Row>> {
@@ -85,17 +104,26 @@ fn rows_from_insert(insert: Insert, schema: &Schema) -> anyhow::Result<Vec<Row>>
                 .map(|c| c.to_string().trim_matches(&['`', '"'][..]).to_lowercase())
                 .collect();
 
-            Some(
-                schema
-                    .columns
+            if insert_names.len() == schema.columns.len()
+                && insert_names
                     .iter()
-                    .map(|sc| {
-                        insert_names
-                            .iter()
-                            .position(|n| n == &sc.name.to_lowercase())
-                    })
-                    .collect(),
-            )
+                    .zip(schema.columns.iter())
+                    .all(|(insert, schema_col)| insert.eq_ignore_ascii_case(&schema_col.name))
+            {
+                None
+            } else {
+                Some(
+                    schema
+                        .columns
+                        .iter()
+                        .map(|sc| {
+                            insert_names
+                                .iter()
+                                .position(|n| n == &sc.name.to_lowercase())
+                        })
+                        .collect(),
+                )
+            }
         } else {
             None // no remapping needed: either INSERT has no column list,
                  // or we have no schema — use values as-is
@@ -147,6 +175,441 @@ fn rows_from_insert(insert: Insert, schema: &Schema) -> anyhow::Result<Vec<Row>>
     }
 
     Ok(rows)
+}
+
+fn parse_mysql_insert_fast(
+    sql: &str,
+    schema: &Schema,
+) -> anyhow::Result<Option<ParsedInsertRows>> {
+    let mut p = MysqlInsertParser::new(sql);
+    let Some(parsed) = p.parse(schema)? else {
+        return Ok(None);
+    };
+    Ok(Some(parsed))
+}
+
+struct MysqlInsertParser<'a> {
+    sql: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> MysqlInsertParser<'a> {
+    fn new(sql: &'a str) -> Self {
+        Self {
+            sql,
+            bytes: sql.as_bytes(),
+            pos: 0,
+        }
+    }
+
+    fn parse(&mut self, schema: &Schema) -> anyhow::Result<Option<ParsedInsertRows>> {
+        self.skip_ws();
+        if !self.consume_keyword("insert") {
+            return Ok(None);
+        }
+
+        loop {
+            self.skip_ws();
+            if self.consume_keyword("low_priority")
+                || self.consume_keyword("delayed")
+                || self.consume_keyword("high_priority")
+                || self.consume_keyword("ignore")
+            {
+                continue;
+            }
+            break;
+        }
+
+        self.skip_ws();
+        if !self.consume_keyword("into") {
+            return Ok(None);
+        }
+
+        self.skip_ws();
+        let Some(table_name) = self.parse_object_name() else {
+            return Ok(None);
+        };
+
+        self.skip_ws();
+        let insert_columns = if self.peek() == Some(b'(') {
+            let Some(columns) = self.parse_column_list() else {
+                return Ok(None);
+            };
+            Some(columns)
+        } else {
+            None
+        };
+
+        self.skip_ws();
+        if !self.consume_keyword("values") && !self.consume_keyword("value") {
+            return Ok(None);
+        }
+
+        let remap = build_remap(insert_columns.as_deref(), schema);
+        let expected_cols = insert_columns
+            .as_ref()
+            .map(|cols| cols.len())
+            .unwrap_or_else(|| schema.column_count());
+
+        let mut rows = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.eof() || self.peek() == Some(b';') {
+                break;
+            }
+            if self.peek() != Some(b'(') {
+                return Ok(None);
+            }
+            self.pos += 1;
+
+            let mut insert_values = Vec::new();
+            loop {
+                self.skip_ws();
+                let Some(value) = self.parse_value()? else {
+                    return Ok(None);
+                };
+                insert_values.push(value);
+                self.skip_ws();
+                match self.peek() {
+                    Some(b',') => self.pos += 1,
+                    Some(b')') => {
+                        self.pos += 1;
+                        break;
+                    }
+                    _ => return Ok(None),
+                }
+            }
+
+            if expected_cols > 0 && insert_values.len() != expected_cols {
+                anyhow::bail!(
+                    "row has {} values but expected {} columns (table: {})",
+                    insert_values.len(),
+                    expected_cols,
+                    table_name,
+                );
+            }
+
+            let values = apply_remap(insert_values, remap.as_deref());
+            rows.push(Row { values });
+
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b';') => break,
+                None => break,
+                _ => return Ok(None),
+            }
+        }
+
+        Ok(Some(ParsedInsertRows {
+            table_name: Some(table_name),
+            rows,
+            used_fast_path: true,
+        }))
+    }
+
+    fn parse_object_name(&mut self) -> Option<String> {
+        let mut last = self.parse_ident()?;
+        loop {
+            self.skip_ws();
+            if self.peek() != Some(b'.') {
+                return Some(last);
+            }
+            self.pos += 1;
+            self.skip_ws();
+            last = self.parse_ident()?;
+        }
+    }
+
+    fn parse_column_list(&mut self) -> Option<Vec<String>> {
+        if self.peek() != Some(b'(') {
+            return None;
+        }
+        self.pos += 1;
+        let mut cols = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.peek() == Some(b')') {
+                self.pos += 1;
+                return Some(cols);
+            }
+            cols.push(self.parse_ident()?);
+            self.skip_ws();
+            match self.peek() {
+                Some(b',') => self.pos += 1,
+                Some(b')') => {
+                    self.pos += 1;
+                    return Some(cols);
+                }
+                _ => return None,
+            }
+        }
+    }
+
+    fn parse_ident(&mut self) -> Option<String> {
+        match self.peek()? {
+            b'`' => self.parse_backtick_ident(),
+            b'"' => self.parse_double_quote_ident(),
+            _ => self.parse_bare_ident(),
+        }
+    }
+
+    fn parse_backtick_ident(&mut self) -> Option<String> {
+        self.pos += 1;
+        let mut out = Vec::new();
+        while !self.eof() {
+            let b = self.bytes[self.pos];
+            self.pos += 1;
+            if b == b'`' {
+                if self.peek() == Some(b'`') {
+                    out.push(b'`');
+                    self.pos += 1;
+                } else {
+                    return Some(String::from_utf8_lossy(&out).into_owned());
+                }
+            } else {
+                out.push(b);
+            }
+        }
+        None
+    }
+
+    fn parse_double_quote_ident(&mut self) -> Option<String> {
+        self.pos += 1;
+        let mut out = Vec::new();
+        while !self.eof() {
+            let b = self.bytes[self.pos];
+            self.pos += 1;
+            if b == b'"' {
+                return Some(String::from_utf8_lossy(&out).into_owned());
+            }
+            out.push(b);
+        }
+        None
+    }
+
+    fn parse_bare_ident(&mut self) -> Option<String> {
+        let start = self.pos;
+        while !self.eof() {
+            let b = self.bytes[self.pos];
+            if b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        if self.pos == start {
+            return None;
+        }
+        Some(self.sql[start..self.pos].to_string())
+    }
+
+    fn parse_value(&mut self) -> anyhow::Result<Option<Value>> {
+        match self.peek() {
+            Some(b'\'') => Ok(Some(Value::Text(self.parse_single_quoted_string()?))),
+            Some(b'X') | Some(b'x') if self.peek_at(1) == Some(b'\'') => {
+                self.pos += 1;
+                let hex = self.parse_single_quoted_string()?;
+                Ok(Some(Value::Bytes(decode_hex(&hex))))
+            }
+            Some(b'+') | Some(b'-') | Some(b'0'..=b'9') => self.parse_number(),
+            Some(_) if self.consume_keyword("null") => Ok(Some(Value::Null)),
+            Some(_) if self.consume_keyword("default") => Ok(Some(Value::Null)),
+            Some(_) if self.consume_keyword("true") => Ok(Some(Value::Bool(true))),
+            Some(_) if self.consume_keyword("false") => Ok(Some(Value::Bool(false))),
+            _ => Ok(None),
+        }
+    }
+
+    fn parse_single_quoted_string(&mut self) -> anyhow::Result<String> {
+        if self.peek() != Some(b'\'') {
+            anyhow::bail!("expected quoted string");
+        }
+        self.pos += 1;
+        let content_start = self.pos;
+        let mut out: Option<Vec<u8>> = None;
+        while !self.eof() {
+            let rest = &self.bytes[self.pos..];
+            let Some(next_special) = memchr2(b'\'', b'\\', rest) else {
+                anyhow::bail!("unterminated quoted string");
+            };
+            if let Some(out) = out.as_mut() {
+                out.extend_from_slice(&rest[..next_special]);
+            }
+            self.pos += next_special;
+
+            let b = self.bytes[self.pos];
+            self.pos += 1;
+            match b {
+                b'\'' => {
+                    if self.peek() == Some(b'\'') {
+                        let out = out.get_or_insert_with(|| {
+                            Vec::from(&self.bytes[content_start..self.pos - 1])
+                        });
+                        out.push(b'\'');
+                        self.pos += 1;
+                    } else {
+                        let content_end = self.pos - 1;
+                        return match out {
+                            Some(out) => Ok(String::from_utf8_lossy(&out).into_owned()),
+                            None => Ok(self.sql[content_start..content_end].to_string()),
+                        };
+                    }
+                }
+                b'\\' => {
+                    let out = out.get_or_insert_with(|| {
+                        Vec::from(&self.bytes[content_start..self.pos - 1])
+                    });
+                    if self.eof() {
+                        out.push(b'\\');
+                        break;
+                    }
+                    let escaped = self.bytes[self.pos];
+                    self.pos += 1;
+                    out.push(match escaped {
+                        b'0' => 0,
+                        b'\'' => b'\'',
+                        b'"' => b'"',
+                        b'b' => 0x08,
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'Z' => 0x1A,
+                        b'\\' => b'\\',
+                        other => other,
+                    });
+                }
+                _ => unreachable!("memchr2 only finds quotes and backslashes"),
+            }
+        }
+        anyhow::bail!("unterminated quoted string")
+    }
+
+    fn parse_number(&mut self) -> anyhow::Result<Option<Value>> {
+        let start = self.pos;
+        if matches!(self.peek(), Some(b'+' | b'-')) {
+            self.pos += 1;
+        }
+        let mut has_digit = false;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            has_digit = true;
+            self.pos += 1;
+        }
+        let mut is_float = false;
+        if self.peek() == Some(b'.') {
+            is_float = true;
+            self.pos += 1;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                has_digit = true;
+                self.pos += 1;
+            }
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            is_float = true;
+            self.pos += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            let exp_start = self.pos;
+            while matches!(self.peek(), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+            if self.pos == exp_start {
+                self.pos = start;
+                return Ok(None);
+            }
+        }
+        if !has_digit {
+            self.pos = start;
+            return Ok(None);
+        }
+        let s = &self.sql[start..self.pos];
+        if is_float {
+            Ok(Some(Value::Float(s.parse::<f64>()?)))
+        } else if let Ok(n) = s.parse::<i64>() {
+            Ok(Some(Value::Integer(n)))
+        } else {
+            Ok(Some(Value::Float(s.parse::<f64>()?)))
+        }
+    }
+
+    fn consume_keyword(&mut self, keyword: &str) -> bool {
+        let end = self.pos + keyword.len();
+        if end > self.bytes.len() {
+            return false;
+        }
+        let candidate = &self.sql[self.pos..end];
+        if !candidate.eq_ignore_ascii_case(keyword) {
+            return false;
+        }
+        if self
+            .bytes
+            .get(end)
+            .is_some_and(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'$'))
+        {
+            return false;
+        }
+        self.pos = end;
+        true
+    }
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(|b| b.is_ascii_whitespace()) {
+            self.pos += 1;
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.bytes.get(self.pos + offset).copied()
+    }
+
+    fn eof(&self) -> bool {
+        self.pos >= self.bytes.len()
+    }
+}
+
+fn build_remap(insert_columns: Option<&[String]>, schema: &Schema) -> Option<Vec<Option<usize>>> {
+    let insert_columns = insert_columns?;
+    if schema.column_count() == 0 {
+        return None;
+    }
+    if insert_columns.len() == schema.columns.len()
+        && insert_columns
+            .iter()
+            .zip(schema.columns.iter())
+            .all(|(insert, schema_col)| insert.eq_ignore_ascii_case(&schema_col.name))
+    {
+        return None;
+    }
+    Some(
+        schema
+            .columns
+            .iter()
+            .map(|sc| {
+                insert_columns
+                    .iter()
+                    .position(|n| n.eq_ignore_ascii_case(&sc.name))
+            })
+            .collect(),
+    )
+}
+
+fn apply_remap(insert_values: Vec<Value>, remap: Option<&[Option<usize>]>) -> Vec<Value> {
+    let Some(remap) = remap else {
+        return insert_values;
+    };
+    remap
+        .iter()
+        .map(|maybe_idx| match maybe_idx {
+            Some(i) => insert_values[*i].clone(),
+            None => Value::Null,
+        })
+        .collect()
 }
 
 // ── Expr → Value ──────────────────────────────────────────────────────────────
@@ -397,6 +860,35 @@ mod tests {
     }
 
     #[test]
+    fn mysql_fast_path_handles_unescaped_arabic_string() {
+        let sql = "INSERT INTO `HadithTable` (`id`, `arabic`) VALUES (1, 'حدثنا عبد الله بن يوسف')";
+        let parsed = extract_insert_rows(sql, &no_schema(), SqlDialect::Mysql)
+            .unwrap()
+            .expect("expected insert rows");
+
+        assert!(parsed.used_fast_path);
+        assert_eq!(parsed.table_name.as_deref(), Some("HadithTable"));
+        assert_eq!(
+            parsed.rows[0].values[1],
+            Value::Text("حدثنا عبد الله بن يوسف".into()),
+        );
+    }
+
+    #[test]
+    fn mysql_fast_path_handles_backslash_escapes() {
+        let sql = r"INSERT INTO t (msg) VALUES ('line\nquote\'slash\\')";
+        let parsed = extract_insert_rows(sql, &no_schema(), SqlDialect::Mysql)
+            .unwrap()
+            .expect("expected insert rows");
+
+        assert!(parsed.used_fast_path);
+        assert_eq!(
+            parsed.rows[0].values[0],
+            Value::Text("line\nquote'slash\\".into()),
+        );
+    }
+
+    #[test]
     fn empty_string() {
         let sql = "INSERT INTO t (s) VALUES ('')";
         let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
@@ -498,6 +990,14 @@ mod tests {
         assert_eq!(rows[0].values[0], Value::Integer(42));
         assert_eq!(rows[0].values[1], Value::Text("Bob".into()));
         assert_eq!(rows[0].values[2], Value::Text("bob@x.com".into()));
+    }
+
+    #[test]
+    fn same_order_insert_columns_do_not_build_remap() {
+        let s = schema(&["id", "name", "email"]);
+        let insert_columns = vec!["id".into(), "name".into(), "email".into()];
+
+        assert!(build_remap(Some(&insert_columns), &s).is_none());
     }
 
     #[test]

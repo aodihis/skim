@@ -507,6 +507,12 @@ impl<R: BufRead> StatementExtractor<R> {
     /// mode for the custom delimiter.  This handles the case where mysqldump
     /// emits `DELIMITER ;;` before stored procedures.
     fn maybe_enter_delimiter_skip(&mut self) {
+        // DELIMITER directives are short standalone commands.  Once a normal
+        // statement has grown past this small prefix window, repeatedly
+        // decoding the full buffer turns large INSERT lines into O(n^2) work.
+        if self.buf.len() > 128 {
+            return;
+        }
         // DELIMITER is always ASCII and only appears before any string content,
         // so from_utf8 will succeed here; fall back to ignoring on error.
         let Ok(s) = std::str::from_utf8(&self.buf) else { return };

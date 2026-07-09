@@ -75,6 +75,16 @@ cargo run -- .\dump.sql -o output.json
 
 The debug summary is written to stderr and is compiled out for release builds.
 
+To isolate `sqlparser` AST construction from row conversion and output writing,
+set `SKIM_PROFILE_AST_ONLY`. This parses matching `INSERT` statements into ASTs
+and disables output file creation:
+
+```powershell
+$env:SKIM_DEBUG = "1"
+$env:SKIM_PROFILE_AST_ONLY = "1"
+cargo run -- --no-progress .\dump.sql -o output.json
+```
+
 ## Output formats
 
 The format is resolved in this order:

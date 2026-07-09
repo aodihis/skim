@@ -6,6 +6,7 @@ mod progress;
 mod writer;
 
 use std::{
+    env,
     fs::File,
     io::{self, BufRead, BufReader, BufWriter, Write},
 };
@@ -19,7 +20,7 @@ use parser::{
     Schema, SqlDialect,
     schema::extract_schema,
     state_machine::StatementExtractor,
-    value_parser::extract_insert_rows,
+    value_parser::{extract_insert_rows, parse_insert_ast_only},
 };
 use writer::{
     Writer,
@@ -34,9 +35,10 @@ use writer::{
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let format = args.resolved_format();
+    let profile_ast_only = env_flag("SKIM_PROFILE_AST_ONLY");
 
     // Parquet cannot stream to stdout — it needs a seekable file.
-    if format == OutputFormat::Parquet && args.is_stdout() {
+    if !profile_ast_only && format == OutputFormat::Parquet && args.is_stdout() {
         return Err(ConvertError::ParquetRequiresFile.into());
     }
 
@@ -83,27 +85,32 @@ fn main() -> anyhow::Result<()> {
     };
 
     // ── Create writer ─────────────────────────────────────────────────────────
-    let mut writer: Box<dyn Writer> = match format {
-        OutputFormat::Parquet => {
-            let path = args.output.as_ref().unwrap(); // stdout already rejected above
-            Box::new(ParquetWriter::new(path, args.batch_size, args.infer_rows)?)
-        }
-        _ => {
-            let out: Box<dyn Write> = if args.is_stdout() {
-                Box::new(BufWriter::new(io::stdout()))
-            } else {
-                let path = args.output.as_ref().unwrap();
-                Box::new(BufWriter::new(File::create(path)?))
-            };
-            match format {
-                OutputFormat::Json    => Box::new(JsonWriter::new(out)),
-                OutputFormat::Jsonl   => Box::new(JsonlWriter::new(out)),
-                OutputFormat::Csv     => Box::new(CsvWriter::new(out, args.no_header)),
-                OutputFormat::Yaml    => Box::new(YamlWriter::new(out)),
-                OutputFormat::Toml    => Box::new(TomlWriter::new(out)),
-                OutputFormat::Parquet => unreachable!(),
+    let mut writer: Option<Box<dyn Writer>> = if profile_ast_only {
+        eprintln!("[skim profile] SKIM_PROFILE_AST_ONLY=1: parsing INSERT ASTs only; output disabled");
+        None
+    } else {
+        Some(match format {
+            OutputFormat::Parquet => {
+                let path = args.output.as_ref().unwrap(); // stdout already rejected above
+                Box::new(ParquetWriter::new(path, args.batch_size, args.infer_rows)?)
             }
-        }
+            _ => {
+                let out: Box<dyn Write> = if args.is_stdout() {
+                    Box::new(BufWriter::new(io::stdout()))
+                } else {
+                    let path = args.output.as_ref().unwrap();
+                    Box::new(BufWriter::new(File::create(path)?))
+                };
+                match format {
+                    OutputFormat::Json    => Box::new(JsonWriter::new(out)),
+                    OutputFormat::Jsonl   => Box::new(JsonlWriter::new(out)),
+                    OutputFormat::Csv     => Box::new(CsvWriter::new(out, args.no_header)),
+                    OutputFormat::Yaml    => Box::new(YamlWriter::new(out)),
+                    OutputFormat::Toml    => Box::new(TomlWriter::new(out)),
+                    OutputFormat::Parquet => unreachable!(),
+                }
+            }
+        })
     };
 
     // ── Stream SQL ────────────────────────────────────────────────────────────
@@ -153,11 +160,22 @@ fn main() -> anyhow::Result<()> {
         debug.record_insert_statement();
         debug.print_insert_parse_start(effective.len());
 
+        if profile_ast_only {
+            let timer = debug.timer();
+            if parse_insert_ast_only(effective, dialect)? {
+                row_count += 1;
+                debug.record_rows(1);
+            }
+            debug.add_row_parse(timer.elapsed());
+            continue;
+        }
+
         let timer = debug.timer();
         let Some(insert) = extract_insert_rows(effective, &schema, dialect)? else {
             continue;
         };
         debug.add_row_parse(timer.elapsed());
+        debug.record_insert_parser(insert.used_fast_path);
         let Some(tname) = insert.table_name else {
             continue;
         };
@@ -169,14 +187,14 @@ fn main() -> anyhow::Result<()> {
 
         // First matching INSERT: write the header once.
         if !header_written {
-            writer.write_header(&schema)?;
+            writer.as_mut().expect("writer must exist").write_header(&schema)?;
             header_written = true;
         }
 
         let timer = debug.timer();
         for row in rows {
             row_count += 1;
-            writer.write_row(&schema, &row)?;
+            writer.as_mut().expect("writer must exist").write_row(&schema, &row)?;
             // Keep the spinner message fresh for stdin (no byte progress available).
             if let Some(b) = &bar {
                 if row_count.is_multiple_of(500) {
@@ -188,11 +206,13 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Ensure write_header is always called (required by JSON/CSV/Parquet writers).
-    if !header_written {
-        writer.write_header(&schema)?;
-    }
     let timer = debug.timer();
-    writer.finish()?;
+    if let Some(w) = writer.as_mut() {
+        if !header_written {
+            w.write_header(&schema)?;
+        }
+        w.finish()?;
+    }
     debug.add_final_write(timer.elapsed());
 
     if let Some(b) = bar {
@@ -257,4 +277,17 @@ fn starts_with_keyword(sql: &str, keyword: &str) -> bool {
         .chars()
         .next()
         .is_none_or(|c| c.is_ascii_whitespace())
+}
+
+fn env_flag(name: &str) -> bool {
+    env::var(name)
+        .map(|value| {
+            let value = value.trim();
+            !value.is_empty()
+                && !value.eq_ignore_ascii_case("0")
+                && !value.eq_ignore_ascii_case("false")
+                && !value.eq_ignore_ascii_case("no")
+                && !value.eq_ignore_ascii_case("off")
+        })
+        .unwrap_or(false)
 }

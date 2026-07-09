@@ -244,6 +244,30 @@ fn debug_summary_hidden_without_env() {
 }
 
 #[test]
+fn ast_only_profile_mode_does_not_create_output_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
+    let out_path = dir.path().join("profile.json");
+
+    let out = skim()
+        .args(["--no-progress", &fixture, "-o", out_path.to_str().unwrap()])
+        .env("SKIM_PROFILE_AST_ONLY", "1")
+        .output()
+        .expect("failed to run skim");
+
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "skim failed\nstderr: {stderr}");
+    assert!(
+        stderr.contains("SKIM_PROFILE_AST_ONLY=1"),
+        "profile mode should announce itself, got: {stderr}",
+    );
+    assert!(
+        !out_path.exists(),
+        "AST-only profile mode should not create an output file",
+    );
+}
+
+#[test]
 fn mysql_versioned_disable_enable_keys_comments_are_ignored() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = write_fixture(
