@@ -157,8 +157,7 @@ mod imp {
             }
 
             let total = self.started_at.elapsed();
-            let measured =
-                self.schema_parse + self.row_parse + self.row_write + self.final_write;
+            let measured = self.schema_parse + self.row_parse + self.row_write + self.final_write;
             let other = total.saturating_sub(measured);
 
             eprintln!(

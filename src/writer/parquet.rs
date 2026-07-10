@@ -8,8 +8,8 @@ use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use parquet::arrow::ArrowWriter;
 use parquet::file::properties::WriterProperties;
 
-use crate::parser::{InferredType, Row, Schema, Value};
 use super::Writer;
+use crate::parser::{InferredType, Row, Schema, Value};
 
 // ── Public writer ─────────────────────────────────────────────────────────────
 
@@ -37,7 +37,10 @@ impl ParquetWriter {
             path: path.to_path_buf(),
             batch_size,
             infer_rows,
-            sql_schema: Schema { table_name: String::new(), columns: vec![] },
+            sql_schema: Schema {
+                table_name: String::new(),
+                columns: vec![],
+            },
             col_types: vec![],
             pending: vec![],
             arrow_schema: None,
@@ -47,8 +50,7 @@ impl ParquetWriter {
 
     /// True when every column has a concrete type (no Unknown left).
     fn all_types_known(&self) -> bool {
-        !self.col_types.is_empty()
-            && self.col_types.iter().all(|t| *t != InferredType::Unknown)
+        !self.col_types.is_empty() && self.col_types.iter().all(|t| *t != InferredType::Unknown)
     }
 
     /// Resolve Arrow schema from current sql_schema + col_types and open the writer.
@@ -91,16 +93,14 @@ impl ParquetWriter {
         if self.pending.is_empty() {
             return Ok(());
         }
-        let schema = self
-            .arrow_schema
-            .as_ref()
-            .expect("arrow_schema must be set before flush")
-            .clone();
+        let Some(schema) = self.arrow_schema.as_ref().cloned() else {
+            anyhow::bail!("Parquet schema must be resolved before flushing rows");
+        };
         let batch = rows_to_record_batch(&schema, &self.pending)?;
-        self.writer
-            .as_mut()
-            .expect("writer must be open before flush")
-            .write(&batch)?;
+        let Some(writer) = self.writer.as_mut() else {
+            anyhow::bail!("Parquet writer must be open before flushing rows");
+        };
+        writer.write(&batch)?;
         self.pending.clear();
         Ok(())
     }
@@ -181,9 +181,9 @@ impl Writer for ParquetWriter {
 fn inferred_to_arrow(t: &InferredType) -> DataType {
     match t {
         InferredType::Boolean => DataType::Boolean,
-        InferredType::Int64   => DataType::Int64,
+        InferredType::Int64 => DataType::Int64,
         InferredType::Float64 => DataType::Float64,
-        _                     => DataType::Utf8,   // Unknown and Utf8 → string
+        _ => DataType::Utf8, // Unknown and Utf8 → string
     }
 }
 
@@ -206,7 +206,7 @@ fn rows_to_record_batch(
                 for row in rows {
                     match row.values.get(i) {
                         Some(Value::Bool(v)) => b.append_value(*v),
-                        _                    => b.append_null(),
+                        _ => b.append_null(),
                     }
                 }
                 Arc::new(b.finish())
@@ -216,8 +216,8 @@ fn rows_to_record_batch(
                 for row in rows {
                     match row.values.get(i) {
                         Some(Value::Integer(v)) => b.append_value(*v),
-                        Some(Value::Bool(v))    => b.append_value(*v as i64),
-                        _                       => b.append_null(),
+                        Some(Value::Bool(v)) => b.append_value(*v as i64),
+                        _ => b.append_null(),
                     }
                 }
                 Arc::new(b.finish())
@@ -226,9 +226,9 @@ fn rows_to_record_batch(
                 let mut b = Float64Builder::with_capacity(rows.len());
                 for row in rows {
                     match row.values.get(i) {
-                        Some(Value::Float(v))   => b.append_value(*v),
+                        Some(Value::Float(v)) => b.append_value(*v),
                         Some(Value::Integer(v)) => b.append_value(*v as f64),
-                        _                       => b.append_null(),
+                        _ => b.append_null(),
                     }
                 }
                 Arc::new(b.finish())
@@ -238,7 +238,7 @@ fn rows_to_record_batch(
                 for row in rows {
                     match row.values.get(i) {
                         Some(Value::Null) | None => b.append_null(),
-                        Some(v)                  => b.append_value(v.to_string()),
+                        Some(v) => b.append_value(v.to_string()),
                     }
                 }
                 Arc::new(b.finish())
@@ -276,10 +276,22 @@ mod tests {
         Schema {
             table_name: "t".into(),
             columns: vec![
-                Column { name: "id".into(),     inferred_type: InferredType::Int64 },
-                Column { name: "name".into(),   inferred_type: InferredType::Utf8 },
-                Column { name: "active".into(), inferred_type: InferredType::Boolean },
-                Column { name: "score".into(),  inferred_type: InferredType::Float64 },
+                Column {
+                    name: "id".into(),
+                    inferred_type: InferredType::Int64,
+                },
+                Column {
+                    name: "name".into(),
+                    inferred_type: InferredType::Utf8,
+                },
+                Column {
+                    name: "active".into(),
+                    inferred_type: InferredType::Boolean,
+                },
+                Column {
+                    name: "score".into(),
+                    inferred_type: InferredType::Float64,
+                },
             ],
         }
     }
@@ -291,14 +303,30 @@ mod tests {
 
         let mut w = ParquetWriter::new(&path, 1000, 100).unwrap();
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![
-            Value::Integer(1), Value::Text("Alice".into()),
-            Value::Bool(true), Value::Float(9.5),
-        ]}).unwrap();
-        w.write_row(&schema, &Row { values: vec![
-            Value::Integer(2), Value::Text("Bob".into()),
-            Value::Bool(false), Value::Null,
-        ]}).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![
+                    Value::Integer(1),
+                    Value::Text("Alice".into()),
+                    Value::Bool(true),
+                    Value::Float(9.5),
+                ],
+            },
+        )
+        .unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![
+                    Value::Integer(2),
+                    Value::Text("Bob".into()),
+                    Value::Bool(false),
+                    Value::Null,
+                ],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let batches = read_parquet(&path);
@@ -318,12 +346,27 @@ mod tests {
     fn infers_schema_from_rows() {
         let path = std::env::temp_dir().join("skim_test_infer.parquet");
         // Empty schema — types must be inferred from rows.
-        let schema = Schema { table_name: "t".into(), columns: vec![] };
+        let schema = Schema {
+            table_name: "t".into(),
+            columns: vec![],
+        };
 
         let mut w = ParquetWriter::new(&path, 1000, 10).unwrap();
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![Value::Integer(1), Value::Text("x".into())] }).unwrap();
-        w.write_row(&schema, &Row { values: vec![Value::Integer(2), Value::Text("y".into())] }).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Integer(1), Value::Text("x".into())],
+            },
+        )
+        .unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Integer(2), Value::Text("y".into())],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let batches = read_parquet(&path);
@@ -344,13 +387,22 @@ mod tests {
         let path = std::env::temp_dir().join("skim_test_batch.parquet");
         let schema = Schema {
             table_name: "t".into(),
-            columns: vec![Column { name: "n".into(), inferred_type: InferredType::Int64 }],
+            columns: vec![Column {
+                name: "n".into(),
+                inferred_type: InferredType::Int64,
+            }],
         };
 
         let mut w = ParquetWriter::new(&path, 2, 100).unwrap();
         w.write_header(&schema).unwrap();
         for i in 0i64..5 {
-            w.write_row(&schema, &Row { values: vec![Value::Integer(i)] }).unwrap();
+            w.write_row(
+                &schema,
+                &Row {
+                    values: vec![Value::Integer(i)],
+                },
+            )
+            .unwrap();
         }
         w.finish().unwrap();
 

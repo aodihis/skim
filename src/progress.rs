@@ -47,26 +47,62 @@ impl<R: BufRead> BufRead for ProgressReader<R> {
 /// Build a progress bar suited to the input source.
 /// - Seekable file (known length): byte-progress bar with ETA.
 /// - Stdin (unknown length): spinner that shows elapsed time.
-pub fn make_bar(file_len: Option<u64>) -> ProgressBar {
+pub fn make_bar(file_len: Option<u64>) -> anyhow::Result<ProgressBar> {
     match file_len {
         Some(len) => {
             let bar = ProgressBar::new(len);
             bar.set_style(
                 ProgressStyle::with_template(
                     "[{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-                )
-                .unwrap()
+                )?
                 .progress_chars("=>-"),
             );
-            bar
+            Ok(bar)
         }
         None => {
             let bar = ProgressBar::new_spinner();
-            bar.set_style(
-                ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] {msg}")
-                    .unwrap(),
-            );
-            bar
+            bar.set_style(ProgressStyle::with_template(
+                "{spinner:.green} [{elapsed_precise}] {msg}",
+            )?);
+            Ok(bar)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufReader, Read};
+
+    #[test]
+    fn progress_reader_read_copies_bytes_and_advances_bar() {
+        let bar = ProgressBar::hidden();
+        let mut reader = ProgressReader::new(BufReader::new(&b"abcdef"[..]), bar.clone());
+        let mut buf = [0_u8; 3];
+
+        let n = reader.read(&mut buf).unwrap();
+
+        assert_eq!(n, 3);
+        assert_eq!(&buf, b"abc");
+        assert_eq!(bar.position(), 3);
+    }
+
+    #[test]
+    fn progress_reader_consume_zero_does_not_advance_bar() {
+        let bar = ProgressBar::hidden();
+        let mut reader = ProgressReader::new(BufReader::new(&b"abc"[..]), bar.clone());
+
+        BufRead::consume(&mut reader, 0);
+
+        assert_eq!(bar.position(), 0);
+    }
+
+    #[test]
+    fn make_bar_builds_sized_bar_and_spinner() {
+        let sized = make_bar(Some(128)).unwrap();
+        assert_eq!(sized.length(), Some(128));
+
+        let spinner = make_bar(None).unwrap();
+        assert_eq!(spinner.length(), None);
     }
 }

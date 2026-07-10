@@ -21,7 +21,7 @@ use super::{Column, InferredType, Schema, SqlDialect};
 /// just `users` (the unqualified part) so that `-t users` matches both dialects.
 pub fn extract_schema(sql: &str, dialect: SqlDialect) -> anyhow::Result<Option<Schema>> {
     let stmts = match dialect {
-        SqlDialect::Mysql    => Parser::parse_sql(&MySqlDialect {},    sql)?,
+        SqlDialect::Mysql => Parser::parse_sql(&MySqlDialect {}, sql)?,
         SqlDialect::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql)?,
     };
 
@@ -44,7 +44,10 @@ pub fn extract_schema(sql: &str, dialect: SqlDialect) -> anyhow::Result<Option<S
         })
         .collect();
 
-    Ok(Some(Schema { table_name, columns }))
+    Ok(Some(Schema {
+        table_name,
+        columns,
+    }))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -104,12 +107,10 @@ fn data_type_to_inferred(dt: &DataType) -> InferredType {
 
         // ── PostgreSQL custom types ───────────────────────────────────────────
         // sqlparser parses SERIAL / SMALLSERIAL / BIGSERIAL as Custom types.
-        DataType::Custom(name, _) => {
-            match name.to_string().to_lowercase().as_str() {
-                "serial" | "smallserial" | "bigserial" => InferredType::Int64,
-                _ => InferredType::Utf8,
-            }
-        }
+        DataType::Custom(name, _) => match name.to_string().to_lowercase().as_str() {
+            "serial" | "smallserial" | "bigserial" => InferredType::Int64,
+            _ => InferredType::Utf8,
+        },
 
         // ── Everything else → text ───────────────────────────────────────────
         // VARCHAR, TEXT, CHAR, ENUM, DATE, DATETIME, TIMESTAMP, BLOB,
@@ -126,11 +127,15 @@ mod tests {
     use crate::parser::InferredType;
 
     fn mysql_schema(sql: &str) -> Schema {
-        extract_schema(sql, SqlDialect::Mysql).unwrap().expect("expected a schema")
+        extract_schema(sql, SqlDialect::Mysql)
+            .unwrap()
+            .expect("expected a schema")
     }
 
     fn pg_schema(sql: &str) -> Schema {
-        extract_schema(sql, SqlDialect::Postgres).unwrap().expect("expected a schema")
+        extract_schema(sql, SqlDialect::Postgres)
+            .unwrap()
+            .expect("expected a schema")
     }
 
     // ── MySQL: table name extraction ────────────────────────────────────────
@@ -172,9 +177,8 @@ mod tests {
 
     #[test]
     fn integer_types() {
-        let schema = mysql_schema(
-            "CREATE TABLE t (a TINYINT, b SMALLINT, c INT, d INTEGER, e BIGINT)",
-        );
+        let schema =
+            mysql_schema("CREATE TABLE t (a TINYINT, b SMALLINT, c INT, d INTEGER, e BIGINT)");
         for col in &schema.columns {
             assert_eq!(col.inferred_type, InferredType::Int64, "col: {}", col.name);
         }
@@ -182,19 +186,21 @@ mod tests {
 
     #[test]
     fn float_types() {
-        let schema = mysql_schema(
-            "CREATE TABLE t (a FLOAT, b DOUBLE, c DECIMAL(10,2), d NUMERIC(8,4))",
-        );
+        let schema =
+            mysql_schema("CREATE TABLE t (a FLOAT, b DOUBLE, c DECIMAL(10,2), d NUMERIC(8,4))");
         for col in &schema.columns {
-            assert_eq!(col.inferred_type, InferredType::Float64, "col: {}", col.name);
+            assert_eq!(
+                col.inferred_type,
+                InferredType::Float64,
+                "col: {}",
+                col.name
+            );
         }
     }
 
     #[test]
     fn text_types_map_to_utf8() {
-        let schema = mysql_schema(
-            "CREATE TABLE t (a VARCHAR(255), b TEXT, c CHAR(10))",
-        );
+        let schema = mysql_schema("CREATE TABLE t (a VARCHAR(255), b TEXT, c CHAR(10))");
         for col in &schema.columns {
             assert_eq!(col.inferred_type, InferredType::Utf8, "col: {}", col.name);
         }
@@ -256,9 +262,7 @@ mod tests {
 
     #[test]
     fn pg_serial_maps_to_int64() {
-        let schema = pg_schema(
-            "CREATE TABLE t (id SERIAL, small SMALLSERIAL, big BIGSERIAL)",
-        );
+        let schema = pg_schema("CREATE TABLE t (id SERIAL, small SMALLSERIAL, big BIGSERIAL)");
         for col in &schema.columns {
             assert_eq!(col.inferred_type, InferredType::Int64, "col: {}", col.name);
         }
@@ -290,15 +294,18 @@ mod tests {
     fn pg_numeric_maps_to_float64() {
         let schema = pg_schema("CREATE TABLE t (price NUMERIC(10,2), rate DECIMAL(8,4))");
         for col in &schema.columns {
-            assert_eq!(col.inferred_type, InferredType::Float64, "col: {}", col.name);
+            assert_eq!(
+                col.inferred_type,
+                InferredType::Float64,
+                "col: {}",
+                col.name
+            );
         }
     }
 
     #[test]
     fn pg_timestamp_maps_to_utf8() {
-        let schema = pg_schema(
-            "CREATE TABLE t (created_at TIMESTAMP, updated_at TIMESTAMPTZ)",
-        );
+        let schema = pg_schema("CREATE TABLE t (created_at TIMESTAMP, updated_at TIMESTAMPTZ)");
         for col in &schema.columns {
             assert_eq!(col.inferred_type, InferredType::Utf8, "col: {}", col.name);
         }

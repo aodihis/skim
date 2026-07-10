@@ -88,6 +88,17 @@ fn assert_success(cmd: &mut Command) -> String {
     stdout
 }
 
+fn assert_failure(cmd: &mut Command) -> (String, String) {
+    let out = cmd.output().expect("failed to run skim");
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(
+        !out.status.success(),
+        "skim unexpectedly succeeded\nstdout: {stdout}\nstderr: {stderr}",
+    );
+    (stdout, stderr)
+}
+
 // ── README example tests ──────────────────────────────────────────────────────
 
 #[test]
@@ -146,12 +157,23 @@ fn default_output_is_json() {
 
     let stdout = assert_success(skim().arg(&fixture));
 
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)
-        .expect("stdout should be valid JSON");
-    assert!(parsed.is_object(), "expected a JSON object grouped by table");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
+    assert!(
+        parsed.is_object(),
+        "expected a JSON object grouped by table"
+    );
     // Both tables present as keys
-    assert_eq!(parsed["users"].as_array().unwrap().len(), 3, "expected 3 users rows");
-    assert_eq!(parsed["orders"].as_array().unwrap().len(), 3, "expected 3 orders rows");
+    assert_eq!(
+        parsed["users"].as_array().unwrap().len(),
+        3,
+        "expected 3 users rows"
+    );
+    assert_eq!(
+        parsed["orders"].as_array().unwrap().len(),
+        3,
+        "expected 3 orders rows"
+    );
 }
 
 /// README: `skim --format jsonl dump.sql`
@@ -164,10 +186,14 @@ fn format_flag_jsonl() {
     let stdout = assert_success(skim().args(["--format", "jsonl", &fixture]));
 
     let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 6, "expected 6 JSONL lines (3 users + 3 orders)");
+    assert_eq!(
+        lines.len(),
+        6,
+        "expected 6 JSONL lines (3 users + 3 orders)"
+    );
     for line in &lines {
-        let v: serde_json::Value = serde_json::from_str(line)
-            .unwrap_or_else(|_| panic!("invalid JSON on line: {line}"));
+        let v: serde_json::Value =
+            serde_json::from_str(line).unwrap_or_else(|_| panic!("invalid JSON on line: {line}"));
         assert!(v.is_object(), "each JSONL line should be an object");
     }
 }
@@ -184,7 +210,12 @@ fn stdin_pipe_jsonl() {
         .spawn()
         .expect("failed to spawn skim");
 
-    child.stdin.take().unwrap().write_all(MYSQL_FIXTURE.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(MYSQL_FIXTURE.as_bytes())
+        .unwrap();
 
     let out = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -210,7 +241,12 @@ fn debug_env_prints_performance_summary() {
         .spawn()
         .expect("failed to spawn skim");
 
-    child.stdin.take().unwrap().write_all(MYSQL_FIXTURE.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(MYSQL_FIXTURE.as_bytes())
+        .unwrap();
 
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -232,7 +268,12 @@ fn debug_summary_hidden_without_env() {
         .spawn()
         .expect("failed to spawn skim");
 
-    child.stdin.take().unwrap().write_all(MYSQL_FIXTURE.as_bytes()).unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(MYSQL_FIXTURE.as_bytes())
+        .unwrap();
 
     let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
@@ -290,8 +331,8 @@ UNLOCK TABLES;
 
     let stdout = assert_success(skim().args(["--no-progress", &fixture]));
 
-    let parsed: serde_json::Value = serde_json::from_str(&stdout)
-        .expect("stdout should be valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdout should be valid JSON");
     let rows = parsed["HadithTable"].as_array().expect("HadithTable rows");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0]["text"], "first");
@@ -305,14 +346,16 @@ fn table_filter_csv() {
     let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
     let out_path = dir.path().join("users.csv");
 
-    assert_success(
-        skim().args(["-t", "users", &fixture, "-o", out_path.to_str().unwrap()]),
-    );
+    assert_success(skim().args(["-t", "users", &fixture, "-o", out_path.to_str().unwrap()]));
 
     let content = fs::read_to_string(&out_path).expect("users.csv not created");
     let lines: Vec<&str> = content.lines().collect();
     // Header + 3 data rows
-    assert_eq!(lines.len(), 4, "expected header + 3 data rows, got: {lines:?}");
+    assert_eq!(
+        lines.len(),
+        4,
+        "expected header + 3 data rows, got: {lines:?}"
+    );
     // Header must contain the column names (not data values)
     assert!(
         lines[0].contains("id") && lines[0].contains("name"),
@@ -342,7 +385,11 @@ fn multi_table_filter_json() {
     assert!(parsed.is_object(), "expected grouped JSON object");
     let users = parsed["users"].as_array().unwrap();
     let orders = parsed["orders"].as_array().unwrap();
-    assert_eq!(users.len() + orders.len(), 6, "expected 3 users + 3 orders = 6 rows");
+    assert_eq!(
+        users.len() + orders.len(),
+        6,
+        "expected 3 users + 3 orders = 6 rows"
+    );
 }
 
 /// README: `skim --no-progress dump.sql -o output.parquet`
@@ -367,11 +414,19 @@ fn progress_flag_exits_ok() {
     let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
     let out_path = dir.path().join("output.csv");
 
-    assert_success(
-        skim().args(["--no-progress", "-t", "users", &fixture, "-o", out_path.to_str().unwrap()]),
-    );
+    assert_success(skim().args([
+        "--no-progress",
+        "-t",
+        "users",
+        &fixture,
+        "-o",
+        out_path.to_str().unwrap(),
+    ]));
 
-    assert!(out_path.exists(), "output.csv should be created with --no-progress");
+    assert!(
+        out_path.exists(),
+        "output.csv should be created with --no-progress"
+    );
 }
 
 /// README: `skim --format csv --no-header dump.sql`
@@ -382,9 +437,8 @@ fn no_header_csv() {
     let dir = tempfile::tempdir().unwrap();
     let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
 
-    let stdout = assert_success(
-        skim().args(["--format", "csv", "--no-header", "-t", "users", &fixture]),
-    );
+    let stdout =
+        assert_success(skim().args(["--format", "csv", "--no-header", "-t", "users", &fixture]));
 
     let first_line = stdout.lines().next().expect("stdout should not be empty");
     // Without a header the first line is the first data row.
@@ -407,9 +461,13 @@ fn yaml_output() {
     let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
     let out_path = dir.path().join("out.yaml");
 
-    assert_success(
-        skim().args(["--format", "yaml", &fixture, "-o", out_path.to_str().unwrap()]),
-    );
+    assert_success(skim().args([
+        "--format",
+        "yaml",
+        &fixture,
+        "-o",
+        out_path.to_str().unwrap(),
+    ]));
 
     let content = fs::read_to_string(&out_path).expect("out.yaml not created");
     assert!(
@@ -426,9 +484,13 @@ fn toml_output() {
     let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
     let out_path = dir.path().join("out.toml");
 
-    assert_success(
-        skim().args(["--format", "toml", &fixture, "-o", out_path.to_str().unwrap()]),
-    );
+    assert_success(skim().args([
+        "--format",
+        "toml",
+        &fixture,
+        "-o",
+        out_path.to_str().unwrap(),
+    ]));
 
     let content = fs::read_to_string(&out_path).expect("out.toml not created");
     assert!(!content.is_empty(), "TOML file should not be empty");
@@ -442,9 +504,7 @@ fn extension_detects_csv() {
     let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
     let out_path = dir.path().join("out.csv");
 
-    assert_success(
-        skim().args(["-t", "users", &fixture, "-o", out_path.to_str().unwrap()]),
-    );
+    assert_success(skim().args(["-t", "users", &fixture, "-o", out_path.to_str().unwrap()]));
 
     let content = fs::read_to_string(&out_path).expect("out.csv not created");
     // A CSV file has comma-separated values; header must be present
@@ -469,6 +529,93 @@ fn extension_detects_jsonl() {
         6,
         "JSONL file should have one line per row",
     );
+}
+
+#[test]
+fn explicit_format_overrides_output_extension() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
+    let out_path = dir.path().join("rows.csv");
+
+    assert_success(skim().args([
+        "--format",
+        "jsonl",
+        "--no-progress",
+        &fixture,
+        "-o",
+        out_path.to_str().unwrap(),
+    ]));
+
+    let content = fs::read_to_string(&out_path).expect("rows.csv not created");
+    let first_line = content.lines().next().expect("jsonl output line");
+    serde_json::from_str::<serde_json::Value>(first_line)
+        .expect("--format jsonl should override .csv extension");
+    assert_eq!(content.lines().count(), 6);
+}
+
+#[test]
+fn stdin_default_output_is_json_when_input_path_is_omitted() {
+    let mut child = skim()
+        .args(["--no-progress"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn skim");
+
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(MYSQL_FIXTURE.as_bytes())
+        .unwrap();
+
+    let out = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "skim failed\nstderr: {stderr}");
+
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("stdin without input path should still emit JSON");
+    assert_eq!(parsed["users"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn parquet_to_stdout_is_rejected() {
+    let (_stdout, stderr) =
+        assert_failure(skim().args(["--format", "parquet", "--no-progress", "-"]));
+
+    assert!(
+        stderr.contains("Parquet requires a real file path"),
+        "unexpected stderr: {stderr}",
+    );
+}
+
+#[test]
+fn max_statement_size_reports_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = write_fixture(&dir, "dump.sql", MYSQL_FIXTURE);
+
+    let (_stdout, stderr) =
+        assert_failure(skim().args(["--max-statement-size", "16", "--no-progress", &fixture]));
+
+    assert!(
+        stderr.contains("exceeds maximum size"),
+        "unexpected stderr: {stderr}",
+    );
+}
+
+#[test]
+fn auto_dialect_detects_postgres_dump_header() {
+    let dir = tempfile::tempdir().unwrap();
+    let fixture = write_fixture(&dir, "pg_dump.sql", PG_FIXTURE);
+
+    let stdout = assert_success(skim().args(["--no-progress", &fixture]));
+
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let rows = parsed["events"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["name"], "Alpha");
 }
 
 /// README: `skim --dialect postgres pg_dump.sql`

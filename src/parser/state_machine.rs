@@ -105,6 +105,10 @@ impl<R: BufRead> Iterator for StatementExtractor<R> {
                 return Some(Ok(stmt));
             }
 
+            if self.try_consume_delimiter_directive(&line) {
+                continue;
+            }
+
             if let Some(stmt) = self.process_bytes(line.as_bytes()) {
                 match stmt {
                     Ok(s) => {
@@ -340,7 +344,7 @@ impl<R: BufRead> StatementExtractor<R> {
                         // we're back to Normal.  We track this via a tiny
                         // sub-state by transitioning to a "maybe end quote"
                         // inline here.
-                        self.state = State::Normal; // tentatively Normal
+                        //
                         // But we need to check the next byte.  We re-enter
                         // InSingleQuote if the next byte is `'`.  Handled
                         // by the Normal branch above: seeing another `'`
@@ -352,6 +356,7 @@ impl<R: BufRead> StatementExtractor<R> {
                         // because `;` inside a string (even after `''`) is
                         // still protected, and the content is preserved as-is
                         // for sqlparser to interpret later.
+                        self.state = State::Normal; // tentatively Normal
                     }
                     _ => {
                         self.push(b);
@@ -515,7 +520,9 @@ impl<R: BufRead> StatementExtractor<R> {
         }
         // DELIMITER is always ASCII and only appears before any string content,
         // so from_utf8 will succeed here; fall back to ignoring on error.
-        let Ok(s) = std::str::from_utf8(&self.buf) else { return };
+        let Ok(s) = std::str::from_utf8(&self.buf) else {
+            return;
+        };
         let trimmed = s.trim_start();
         if trimmed.len() < 10 {
             return;
@@ -531,6 +538,32 @@ impl<R: BufRead> StatementExtractor<R> {
             self.buf.clear();
         }
     }
+
+    fn try_consume_delimiter_directive(&mut self, line: &str) -> bool {
+        if self.state != State::Normal {
+            return false;
+        }
+        if !self.buf.iter().all(|b| b.is_ascii_whitespace()) {
+            return false;
+        }
+
+        let trimmed = line.trim_start();
+        if trimmed.len() < 9 || !trimmed[..9].eq_ignore_ascii_case("delimiter") {
+            return false;
+        }
+        let rest = trimmed[9..].trim();
+        if rest.is_empty() {
+            return false;
+        }
+
+        self.buf.clear();
+        if rest != ";" {
+            self.state = State::SkipDelimiter {
+                delim: rest.as_bytes().to_vec(),
+            };
+        }
+        true
+    }
 }
 
 fn is_normal_special(b: u8) -> bool {
@@ -542,7 +575,7 @@ fn is_normal_special(b: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::BufReader;
+    use std::io::{self, BufReader, Read};
 
     fn extract(sql: &str) -> Vec<String> {
         let reader = BufReader::new(sql.as_bytes());
@@ -560,16 +593,18 @@ mod tests {
 
     #[test]
     fn two_statements() {
-        let stmts = extract(
-            "INSERT INTO a VALUES (1);\nINSERT INTO b VALUES (2);",
-        );
+        let stmts = extract("INSERT INTO a VALUES (1);\nINSERT INTO b VALUES (2);");
         assert_eq!(stmts.len(), 2);
     }
 
     #[test]
     fn semicolon_inside_string() {
         let stmts = extract("INSERT INTO t VALUES ('hello; world');");
-        assert_eq!(stmts.len(), 1, "semicolon inside string must not split statement");
+        assert_eq!(
+            stmts.len(),
+            1,
+            "semicolon inside string must not split statement"
+        );
     }
 
     #[test]
@@ -593,27 +628,21 @@ mod tests {
 
     #[test]
     fn line_comment_skipped() {
-        let stmts = extract(
-            "-- this is a comment\nINSERT INTO t VALUES (1);",
-        );
+        let stmts = extract("-- this is a comment\nINSERT INTO t VALUES (1);");
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].contains("INSERT"));
     }
 
     #[test]
     fn block_comment_skipped() {
-        let stmts = extract(
-            "/* header comment\n   spanning lines */\nINSERT INTO t VALUES (1);",
-        );
+        let stmts = extract("/* header comment\n   spanning lines */\nINSERT INTO t VALUES (1);");
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].contains("INSERT"));
     }
 
     #[test]
     fn multiline_insert() {
-        let stmts = extract(
-            "INSERT INTO t\n  (a, b)\n  VALUES\n  (1, 'foo'),\n  (2, 'bar');",
-        );
+        let stmts = extract("INSERT INTO t\n  (a, b)\n  VALUES\n  (1, 'foo'),\n  (2, 'bar');");
         assert_eq!(stmts.len(), 1);
     }
 
@@ -625,9 +654,7 @@ mod tests {
 
     #[test]
     fn set_and_insert() {
-        let stmts = extract(
-            "SET NAMES utf8mb4;\nINSERT INTO t VALUES (42);",
-        );
+        let stmts = extract("SET NAMES utf8mb4;\nINSERT INTO t VALUES (42);");
         assert_eq!(stmts.len(), 2);
     }
 
@@ -645,5 +672,94 @@ mod tests {
         let stmts = extract("/* ** not closed yet ** */\nINSERT INTO t VALUES (1);");
         assert_eq!(stmts.len(), 1);
         assert!(stmts[0].contains("INSERT"));
+    }
+
+    #[test]
+    fn incomplete_statement_at_eof_is_returned_once() {
+        let reader = BufReader::new("INSERT INTO t VALUES (1)".as_bytes());
+        let mut extractor = StatementExtractor::new(reader, 1024);
+
+        assert_eq!(
+            extractor.next().unwrap().unwrap(),
+            "INSERT INTO t VALUES (1)",
+        );
+        assert!(extractor.next().is_none());
+    }
+
+    #[test]
+    fn done_iterator_stays_done() {
+        let reader = BufReader::new("".as_bytes());
+        let mut extractor = StatementExtractor::new(reader, 1024);
+
+        assert!(extractor.next().is_none());
+        assert!(extractor.next().is_none());
+    }
+
+    #[test]
+    fn reader_error_is_returned_and_stops_iteration() {
+        struct FailingReader;
+
+        impl Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("boom"))
+            }
+        }
+
+        impl BufRead for FailingReader {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                Err(io::Error::other("boom"))
+            }
+
+            fn consume(&mut self, _amt: usize) {}
+        }
+
+        let mut extractor = StatementExtractor::new(FailingReader, 1024);
+
+        let err = extractor.next().unwrap().unwrap_err();
+        assert!(err.to_string().contains("boom"));
+        assert!(extractor.next().is_none());
+    }
+
+    #[test]
+    fn statement_size_limit_errors_for_long_normal_text() {
+        let reader = BufReader::new("INSERT INTO t VALUES (12345);".as_bytes());
+        let mut extractor = StatementExtractor::new(reader, 10);
+
+        let err = extractor.next().unwrap().unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum size"),
+            "unexpected error: {err}",
+        );
+        assert!(extractor.next().is_none());
+    }
+
+    #[test]
+    fn double_quoted_identifier_with_escaped_quote_across_line_boundary() {
+        let stmts = extract("SELECT \"a\\\n;still identifier\" FROM t;\nSELECT 2;");
+
+        assert_eq!(stmts.len(), 2);
+        assert!(stmts[0].contains(";still identifier"));
+    }
+
+    #[test]
+    fn minus_and_slash_not_starting_comments_are_normal_sql() {
+        let stmts = extract("SELECT 4-2;\nSELECT 8/4;");
+
+        assert_eq!(stmts, ["SELECT 4-2", "SELECT 8/4"]);
+    }
+
+    #[test]
+    fn mysql_custom_delimiter_section_is_skipped() {
+        let stmts = extract(
+            "DELIMITER //\n\
+             CREATE PROCEDURE p()\n\
+             BEGIN\n\
+               SELECT 1;\n\
+             END//\n\
+             DELIMITER ;\n\
+             INSERT INTO t VALUES (1);",
+        );
+
+        assert_eq!(stmts, ["INSERT INTO t VALUES (1)"]);
     }
 }

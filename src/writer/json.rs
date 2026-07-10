@@ -1,7 +1,7 @@
 use std::io::Write;
 
+use super::{row_to_json_object, Writer};
 use crate::parser::{Row, Schema};
-use super::{Writer, row_to_json_object};
 
 /// Writes JSON output grouped by table name:
 ///
@@ -104,8 +104,14 @@ mod tests {
         Schema {
             table_name: "users".into(),
             columns: vec![
-                Column { name: "id".into(),   inferred_type: InferredType::Int64 },
-                Column { name: "name".into(), inferred_type: InferredType::Utf8 },
+                Column {
+                    name: "id".into(),
+                    inferred_type: InferredType::Int64,
+                },
+                Column {
+                    name: "name".into(),
+                    inferred_type: InferredType::Utf8,
+                },
             ],
         }
     }
@@ -114,8 +120,14 @@ mod tests {
         Schema {
             table_name: "orders".into(),
             columns: vec![
-                Column { name: "id".into(),    inferred_type: InferredType::Int64 },
-                Column { name: "total".into(), inferred_type: InferredType::Float64 },
+                Column {
+                    name: "id".into(),
+                    inferred_type: InferredType::Int64,
+                },
+                Column {
+                    name: "total".into(),
+                    inferred_type: InferredType::Float64,
+                },
             ],
         }
     }
@@ -124,8 +136,12 @@ mod tests {
     fn single_table_grouped() {
         let schema = users_schema();
         let rows = vec![
-            Row { values: vec![Value::Integer(1), Value::Text("Alice".into())] },
-            Row { values: vec![Value::Integer(2), Value::Text("Bob".into())] },
+            Row {
+                values: vec![Value::Integer(1), Value::Text("Alice".into())],
+            },
+            Row {
+                values: vec![Value::Integer(2), Value::Text("Bob".into())],
+            },
         ];
         let mut out = Vec::new();
         let mut w = JsonWriter::new(&mut out);
@@ -150,9 +166,27 @@ mod tests {
         let os = orders_schema();
         let mut out = Vec::new();
         let mut w = JsonWriter::new(&mut out);
-        w.write_row(&us, &Row { values: vec![Value::Integer(1), Value::Text("Alice".into())] }).unwrap();
-        w.write_row(&us, &Row { values: vec![Value::Integer(2), Value::Text("Bob".into())] }).unwrap();
-        w.write_row(&os, &Row { values: vec![Value::Integer(1), Value::Float(99.99)] }).unwrap();
+        w.write_row(
+            &us,
+            &Row {
+                values: vec![Value::Integer(1), Value::Text("Alice".into())],
+            },
+        )
+        .unwrap();
+        w.write_row(
+            &us,
+            &Row {
+                values: vec![Value::Integer(2), Value::Text("Bob".into())],
+            },
+        )
+        .unwrap();
+        w.write_row(
+            &os,
+            &Row {
+                values: vec![Value::Integer(1), Value::Float(99.99)],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let s = String::from_utf8(out).unwrap();
@@ -181,7 +215,13 @@ mod tests {
         // calling write_header multiple times must not produce extra output
         w.write_header(&schema).unwrap();
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![Value::Integer(1), Value::Null] }).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Integer(1), Value::Null],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
         let s = String::from_utf8(out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
@@ -193,7 +233,13 @@ mod tests {
         let schema = users_schema();
         let mut out = Vec::new();
         let mut w = JsonWriter::new(&mut out);
-        w.write_row(&schema, &Row { values: vec![Value::Integer(99), Value::Null] }).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Integer(99), Value::Null],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
         let s = String::from_utf8(out).unwrap();
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();

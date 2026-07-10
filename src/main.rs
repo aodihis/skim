@@ -17,19 +17,14 @@ use cli::{Args, CliDialect, OutputFormat};
 use debug_stats::DebugStats;
 use error::ConvertError;
 use parser::{
-    Schema, SqlDialect,
     schema::extract_schema,
     state_machine::StatementExtractor,
     value_parser::{extract_insert_rows, parse_insert_ast_only},
+    Schema, SqlDialect,
 };
 use writer::{
-    Writer,
-    csv::CsvWriter,
-    json::JsonWriter,
-    jsonl::JsonlWriter,
-    parquet::ParquetWriter,
-    toml::TomlWriter,
-    yaml::YamlWriter,
+    csv::CsvWriter, json::JsonWriter, jsonl::JsonlWriter, parquet::ParquetWriter, toml::TomlWriter,
+    yaml::YamlWriter, Writer,
 };
 
 fn main() -> anyhow::Result<()> {
@@ -48,7 +43,9 @@ fn main() -> anyhow::Result<()> {
         file_len = None;
         Box::new(BufReader::new(io::stdin()))
     } else {
-        let path = args.input.as_ref().unwrap();
+        let Some(path) = args.input.as_ref() else {
+            anyhow::bail!("input path is required when not reading from stdin");
+        };
         let f = File::open(path)?;
         file_len = f.metadata().ok().map(|m| m.len());
         Box::new(BufReader::new(f))
@@ -59,9 +56,9 @@ fn main() -> anyhow::Result<()> {
     // fill_buf() fills the BufReader's internal buffer and returns a reference
     // to it — nothing is consumed until consume() is called.
     let dialect = match args.dialect {
-        CliDialect::Mysql    => SqlDialect::Mysql,
+        CliDialect::Mysql => SqlDialect::Mysql,
         CliDialect::Postgres => SqlDialect::Postgres,
-        CliDialect::Auto     => {
+        CliDialect::Auto => {
             let buf = raw_reader.fill_buf()?;
             let peek = &buf[..buf.len().min(2048)];
             if memchr::memmem::find(peek, b"PostgreSQL database dump").is_some() {
@@ -75,7 +72,7 @@ fn main() -> anyhow::Result<()> {
     // ── Optional progress bar ─────────────────────────────────────────────────
     let bar;
     let reader: Box<dyn BufRead> = if !args.no_progress {
-        let b = progress::make_bar(file_len);
+        let b = progress::make_bar(file_len)?;
         let wrapped = Box::new(progress::ProgressReader::new(raw_reader, b.clone()));
         bar = Some(b);
         wrapped
@@ -86,27 +83,33 @@ fn main() -> anyhow::Result<()> {
 
     // ── Create writer ─────────────────────────────────────────────────────────
     let mut writer: Option<Box<dyn Writer>> = if profile_ast_only {
-        eprintln!("[skim profile] SKIM_PROFILE_AST_ONLY=1: parsing INSERT ASTs only; output disabled");
+        eprintln!(
+            "[skim profile] SKIM_PROFILE_AST_ONLY=1: parsing INSERT ASTs only; output disabled"
+        );
         None
     } else {
         Some(match format {
             OutputFormat::Parquet => {
-                let path = args.output.as_ref().unwrap(); // stdout already rejected above
+                let Some(path) = args.output.as_ref() else {
+                    return Err(ConvertError::ParquetRequiresFile.into());
+                };
                 Box::new(ParquetWriter::new(path, args.batch_size, args.infer_rows)?)
             }
             _ => {
                 let out: Box<dyn Write> = if args.is_stdout() {
                     Box::new(BufWriter::new(io::stdout()))
                 } else {
-                    let path = args.output.as_ref().unwrap();
+                    let Some(path) = args.output.as_ref() else {
+                        anyhow::bail!("output path is required when not writing to stdout");
+                    };
                     Box::new(BufWriter::new(File::create(path)?))
                 };
                 match format {
-                    OutputFormat::Json    => Box::new(JsonWriter::new(out)),
-                    OutputFormat::Jsonl   => Box::new(JsonlWriter::new(out)),
-                    OutputFormat::Csv     => Box::new(CsvWriter::new(out, args.no_header)),
-                    OutputFormat::Yaml    => Box::new(YamlWriter::new(out)),
-                    OutputFormat::Toml    => Box::new(TomlWriter::new(out)),
+                    OutputFormat::Json => Box::new(JsonWriter::new(out)),
+                    OutputFormat::Jsonl => Box::new(JsonlWriter::new(out)),
+                    OutputFormat::Csv => Box::new(CsvWriter::new(out, args.no_header)),
+                    OutputFormat::Yaml => Box::new(YamlWriter::new(out)),
+                    OutputFormat::Toml => Box::new(TomlWriter::new(out)),
                     OutputFormat::Parquet => unreachable!(),
                 }
             }
@@ -115,7 +118,10 @@ fn main() -> anyhow::Result<()> {
 
     // ── Stream SQL ────────────────────────────────────────────────────────────
     let extractor = StatementExtractor::new(reader, args.max_statement_size);
-    let mut schema = Schema { table_name: String::new(), columns: vec![] };
+    let mut schema = Schema {
+        table_name: String::new(),
+        columns: vec![],
+    };
     let mut header_written = false;
     let mut row_count = 0u64;
     let mut debug = DebugStats::new(file_len);
@@ -187,14 +193,20 @@ fn main() -> anyhow::Result<()> {
 
         // First matching INSERT: write the header once.
         if !header_written {
-            writer.as_mut().expect("writer must exist").write_header(&schema)?;
+            let Some(w) = writer.as_mut() else {
+                anyhow::bail!("writer is disabled while rows are being written");
+            };
+            w.write_header(&schema)?;
             header_written = true;
         }
 
         let timer = debug.timer();
         for row in rows {
             row_count += 1;
-            writer.as_mut().expect("writer must exist").write_row(&schema, &row)?;
+            let Some(w) = writer.as_mut() else {
+                anyhow::bail!("writer is disabled while rows are being written");
+            };
+            w.write_row(&schema, &row)?;
             // Keep the spinner message fresh for stdin (no byte progress available).
             if let Some(b) = &bar {
                 if row_count.is_multiple_of(500) {
@@ -234,7 +246,10 @@ fn table_matches(name: &str, filter: &[String]) -> bool {
     }
     // Take only the last dot-separated segment to drop schema prefixes.
     let unqualified = name.rsplit('.').next().unwrap_or(name);
-    let clean = unqualified.trim_matches('`').trim_matches('"').to_lowercase();
+    let clean = unqualified
+        .trim_matches('`')
+        .trim_matches('"')
+        .to_lowercase();
     filter.iter().any(|t| t.to_lowercase() == clean)
 }
 
@@ -251,13 +266,13 @@ fn skip_leading_comments(sql: &str) -> &str {
             // Skip to end of line.
             s = match s.find('\n') {
                 Some(pos) => s[pos + 1..].trim_start(),
-                None      => return "",
+                None => return "",
             };
         } else if s.starts_with("/*") {
             // Skip block comment.
             s = match s.find("*/") {
                 Some(pos) => s[pos + 2..].trim_start(),
-                None      => return "",
+                None => return "",
             };
         } else {
             return s;

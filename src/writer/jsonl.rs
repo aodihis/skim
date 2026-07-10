@@ -1,7 +1,7 @@
 use std::io::Write;
 
+use super::{row_to_json_object, Writer};
 use crate::parser::{Row, Schema};
-use super::{Writer, row_to_json_object};
 
 pub struct JsonlWriter<W: Write> {
     out: W,
@@ -40,9 +40,18 @@ mod tests {
         Schema {
             table_name: "t".into(),
             columns: vec![
-                Column { name: "id".into(),     inferred_type: InferredType::Int64 },
-                Column { name: "name".into(),   inferred_type: InferredType::Utf8 },
-                Column { name: "active".into(), inferred_type: InferredType::Boolean },
+                Column {
+                    name: "id".into(),
+                    inferred_type: InferredType::Int64,
+                },
+                Column {
+                    name: "name".into(),
+                    inferred_type: InferredType::Utf8,
+                },
+                Column {
+                    name: "active".into(),
+                    inferred_type: InferredType::Boolean,
+                },
             ],
         }
     }
@@ -53,12 +62,24 @@ mod tests {
         let mut out = Vec::new();
         let mut w = JsonlWriter::new(&mut out);
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![
-            Value::Integer(1), Value::Text("Alice".into()), Value::Bool(true),
-        ]}).unwrap();
-        w.write_row(&schema, &Row { values: vec![
-            Value::Integer(2), Value::Text("Bob".into()), Value::Null,
-        ]}).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![
+                    Value::Integer(1),
+                    Value::Text("Alice".into()),
+                    Value::Bool(true),
+                ],
+            },
+        )
+        .unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Integer(2), Value::Text("Bob".into()), Value::Null],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let s = String::from_utf8(out).unwrap();
@@ -81,9 +102,13 @@ mod tests {
         let mut out = Vec::new();
         let mut w = JsonlWriter::new(&mut out);
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![
-            Value::Null, Value::Null, Value::Null,
-        ]}).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Null, Value::Null, Value::Null],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let s = String::from_utf8(out).unwrap();
@@ -97,12 +122,21 @@ mod tests {
     fn float_value() {
         let schema = Schema {
             table_name: "t".into(),
-            columns: vec![Column { name: "score".into(), inferred_type: InferredType::Float64 }],
+            columns: vec![Column {
+                name: "score".into(),
+                inferred_type: InferredType::Float64,
+            }],
         };
         let mut out = Vec::new();
         let mut w = JsonlWriter::new(&mut out);
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![Value::Float(3.14)] }).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Float(3.14)],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let s = String::from_utf8(out).unwrap();

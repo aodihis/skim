@@ -5,13 +5,13 @@
 //! - Parser entry point: <https://docs.rs/sqlparser/latest/sqlparser/parser/struct.Parser.html#method.parse_sql>
 
 use memchr::memchr2;
-use sqlparser::ast::{Expr, Insert, SetExpr, Statement, TableObject, UnaryOperator};
 use sqlparser::ast::Value as SqlValue;
+use sqlparser::ast::{Expr, Insert, SetExpr, Statement, TableObject, UnaryOperator};
 use sqlparser::dialect::{MySqlDialect, PostgreSqlDialect};
 use sqlparser::parser::Parser;
 
-use super::{Row, Schema, SqlDialect, Value};
 use super::schema::unqualified_name;
+use super::{Row, Schema, SqlDialect, Value};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -132,12 +132,12 @@ fn rows_from_insert(insert: Insert, schema: &Schema) -> anyhow::Result<Vec<Row>>
     // Navigate: Insert.source → Query.body → SetExpr::Values → Values.rows
     let source = match insert.source {
         Some(s) => s,
-        None    => return Ok(vec![]), // INSERT ... SET form (MySQL), no VALUES
+        None => return Ok(vec![]), // INSERT ... SET form (MySQL), no VALUES
     };
 
     let values = match source.body.as_ref() {
         SetExpr::Values(v) => v,
-        _                  => return Ok(vec![]),
+        _ => return Ok(vec![]),
     };
 
     // Convert each row of SQL expressions into our Row type.
@@ -164,23 +164,22 @@ fn rows_from_insert(insert: Insert, schema: &Schema) -> anyhow::Result<Vec<Row>>
                 .iter()
                 .map(|maybe_idx| match maybe_idx {
                     Some(i) => insert_values[*i].clone(),
-                    None    => Value::Null, // column not present in INSERT → NULL
+                    None => Value::Null, // column not present in INSERT → NULL
                 })
                 .collect()
         } else {
             insert_values
         };
 
-        rows.push(Row { values: final_values });
+        rows.push(Row {
+            values: final_values,
+        });
     }
 
     Ok(rows)
 }
 
-fn parse_mysql_insert_fast(
-    sql: &str,
-    schema: &Schema,
-) -> anyhow::Result<Option<ParsedInsertRows>> {
+fn parse_mysql_insert_fast(sql: &str, schema: &Schema) -> anyhow::Result<Option<ParsedInsertRows>> {
     let mut p = MysqlInsertParser::new(sql);
     let Some(parsed) = p.parse(schema)? else {
         return Ok(None);
@@ -458,9 +457,8 @@ impl<'a> MysqlInsertParser<'a> {
                     }
                 }
                 b'\\' => {
-                    let out = out.get_or_insert_with(|| {
-                        Vec::from(&self.bytes[content_start..self.pos - 1])
-                    });
+                    let out = out
+                        .get_or_insert_with(|| Vec::from(&self.bytes[content_start..self.pos - 1]));
                     if self.eof() {
                         out.push(b'\\');
                         break;
@@ -622,18 +620,17 @@ fn expr_to_value(expr: &Expr) -> anyhow::Result<Value> {
         Expr::Value(v) => sql_value_to_value(&v.value),
 
         // Negative numbers: `-42` is parsed as UnaryOp(Minus, Number("42")).
-        Expr::UnaryOp { op: UnaryOperator::Minus, expr } => {
-            match expr_to_value(expr)? {
-                Value::Integer(n) => Ok(Value::Integer(-n)),
-                Value::Float(f)   => Ok(Value::Float(-f)),
-                other             => Ok(other),
-            }
-        }
+        Expr::UnaryOp {
+            op: UnaryOperator::Minus,
+            expr,
+        } => match expr_to_value(expr)? {
+            Value::Integer(n) => Ok(Value::Integer(-n)),
+            Value::Float(f) => Ok(Value::Float(-f)),
+            other => Ok(other),
+        },
 
         // DEFAULT keyword (e.g. INSERT INTO t VALUES (DEFAULT, 'foo')).
-        Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("default") => {
-            Ok(Value::Null)
-        }
+        Expr::Identifier(ident) if ident.value.eq_ignore_ascii_case("default") => Ok(Value::Null),
 
         // PostgreSQL cast: expr::TYPE — extract the value, discard the cast.
         // e.g. '2024-01-01'::timestamp  →  Value::Text("2024-01-01")
@@ -651,11 +648,11 @@ fn expr_to_value(expr: &Expr) -> anyhow::Result<Value> {
 /// Convert a sqlparser `Value` literal into our `Value` enum.
 fn sql_value_to_value(v: &SqlValue) -> anyhow::Result<Value> {
     match v {
-        SqlValue::Null          => Ok(Value::Null),
-        SqlValue::Boolean(b)    => Ok(Value::Bool(*b)),
+        SqlValue::Null => Ok(Value::Null),
+        SqlValue::Boolean(b) => Ok(Value::Bool(*b)),
 
         // Numbers: try integer first, then float.
-        SqlValue::Number(n, _)  => {
+        SqlValue::Number(n, _) => {
             if let Ok(i) = n.parse::<i64>() {
                 Ok(Value::Integer(i))
             } else {
@@ -697,7 +694,11 @@ fn sql_value_to_value(v: &SqlValue) -> anyhow::Result<Value> {
 /// Invalid nibbles are silently skipped.
 fn decode_hex(s: &str) -> Vec<u8> {
     let s = s.trim();
-    let s = if !s.len().is_multiple_of(2) { &s[1..] } else { s }; // drop odd leading nibble
+    let s = if !s.len().is_multiple_of(2) {
+        &s[1..]
+    } else {
+        s
+    }; // drop odd leading nibble
     (0..s.len())
         .step_by(2)
         .filter_map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
@@ -719,7 +720,7 @@ pub fn insert_table_name(sql: &str, dialect: SqlDialect) -> anyhow::Result<Optio
 
 fn parse_insert(sql: &str, dialect: SqlDialect) -> anyhow::Result<Option<Insert>> {
     let stmts = match dialect {
-        SqlDialect::Mysql    => Parser::parse_sql(&MySqlDialect {},    sql)?,
+        SqlDialect::Mysql => Parser::parse_sql(&MySqlDialect {}, sql)?,
         SqlDialect::Postgres => Parser::parse_sql(&PostgreSqlDialect {}, sql)?,
     };
 
@@ -754,17 +755,23 @@ mod tests {
 
     /// Build an empty schema (no column info — skips column-count check).
     fn no_schema() -> Schema {
-        Schema { table_name: "t".into(), columns: vec![] }
+        Schema {
+            table_name: "t".into(),
+            columns: vec![],
+        }
     }
 
     /// Build a schema with the given column names.
     fn schema(cols: &[&str]) -> Schema {
         Schema {
             table_name: "t".into(),
-            columns: cols.iter().map(|n| Column {
-                name: n.to_string(),
-                inferred_type: InferredType::Unknown,
-            }).collect(),
+            columns: cols
+                .iter()
+                .map(|n| Column {
+                    name: n.to_string(),
+                    inferred_type: InferredType::Unknown,
+                })
+                .collect(),
         }
     }
 
@@ -901,7 +908,10 @@ mod tests {
     fn hex_literal() {
         let sql = "INSERT INTO t (data) VALUES (X'DEADBEEF')";
         let rows = extract_rows(sql, &no_schema(), SqlDialect::Mysql).unwrap();
-        assert_eq!(rows[0].values[0], Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(
+            rows[0].values[0],
+            Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])
+        );
     }
 
     // ── Special keywords ────────────────────────────────────────────────────
@@ -938,7 +948,10 @@ mod tests {
         let sql = "INSERT INTO t VALUES (1, 2, 3)";
         let s = schema(&["a", "b"]);
         let result = extract_rows(sql, &s, SqlDialect::Mysql);
-        assert!(result.is_err(), "column count mismatch should return an error");
+        assert!(
+            result.is_err(),
+            "column count mismatch should return an error"
+        );
     }
 
     #[test]
@@ -954,8 +967,8 @@ mod tests {
     #[test]
     fn decode_hex_basic() {
         assert_eq!(decode_hex("DEADBEEF"), vec![0xDE, 0xAD, 0xBE, 0xEF]);
-        assert_eq!(decode_hex("00FF"),     vec![0x00, 0xFF]);
-        assert_eq!(decode_hex(""),         Vec::<u8>::new());
+        assert_eq!(decode_hex("00FF"), vec![0x00, 0xFF]);
+        assert_eq!(decode_hex(""), Vec::<u8>::new());
     }
 
     #[test]
@@ -975,9 +988,13 @@ mod tests {
         let sql = "INSERT INTO users (email, id, name) VALUES ('alice@x.com', 1, 'Alice')";
         let rows = extract_rows(sql, &s, SqlDialect::Mysql).unwrap();
 
-        assert_eq!(rows[0].values[0], Value::Integer(1),            "id");
-        assert_eq!(rows[0].values[1], Value::Text("Alice".into()),  "name");
-        assert_eq!(rows[0].values[2], Value::Text("alice@x.com".into()), "email");
+        assert_eq!(rows[0].values[0], Value::Integer(1), "id");
+        assert_eq!(rows[0].values[1], Value::Text("Alice".into()), "name");
+        assert_eq!(
+            rows[0].values[2],
+            Value::Text("alice@x.com".into()),
+            "email"
+        );
     }
 
     #[test]
@@ -1010,7 +1027,11 @@ mod tests {
 
         assert_eq!(rows[0].values[0], Value::Integer(7));
         assert_eq!(rows[0].values[1], Value::Text("Carol".into()));
-        assert_eq!(rows[0].values[2], Value::Null, "missing email should be NULL");
+        assert_eq!(
+            rows[0].values[2],
+            Value::Null,
+            "missing email should be NULL"
+        );
     }
 
     // ── PostgreSQL dialect ──────────────────────────────────────────────────

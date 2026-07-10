@@ -108,14 +108,15 @@ impl Args {
         if let Some(path) = &self.output {
             if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                 return match ext {
-                    e if e.eq_ignore_ascii_case("json")    => OutputFormat::Json,
-                    e if e.eq_ignore_ascii_case("jsonl")   => OutputFormat::Jsonl,
-                    e if e.eq_ignore_ascii_case("csv")     => OutputFormat::Csv,
-                    e if e.eq_ignore_ascii_case("yaml")
-                      || e.eq_ignore_ascii_case("yml")     => OutputFormat::Yaml,
-                    e if e.eq_ignore_ascii_case("toml")    => OutputFormat::Toml,
+                    e if e.eq_ignore_ascii_case("json") => OutputFormat::Json,
+                    e if e.eq_ignore_ascii_case("jsonl") => OutputFormat::Jsonl,
+                    e if e.eq_ignore_ascii_case("csv") => OutputFormat::Csv,
+                    e if e.eq_ignore_ascii_case("yaml") || e.eq_ignore_ascii_case("yml") => {
+                        OutputFormat::Yaml
+                    }
+                    e if e.eq_ignore_ascii_case("toml") => OutputFormat::Toml,
                     e if e.eq_ignore_ascii_case("parquet") => OutputFormat::Parquet,
-                    _                                      => OutputFormat::Json,
+                    _ => OutputFormat::Json,
                 };
             }
         }
@@ -138,5 +139,77 @@ impl Args {
             None => true,
             Some(p) => p.to_str() == Some("-"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args() -> Args {
+        Args {
+            input: None,
+            output: None,
+            format: None,
+            tables: vec![],
+            infer_rows: 1000,
+            batch_size: 10000,
+            max_statement_size: 268435456,
+            no_header: false,
+            no_progress: false,
+            dialect: CliDialect::Auto,
+        }
+    }
+
+    #[test]
+    fn explicit_format_overrides_output_extension() {
+        let mut args = args();
+        args.output = Some(PathBuf::from("rows.csv"));
+        args.format = Some(OutputFormat::Jsonl);
+
+        assert_eq!(args.resolved_format(), OutputFormat::Jsonl);
+    }
+
+    #[test]
+    fn resolves_known_extensions_case_insensitively() {
+        for (path, expected) in [
+            ("out.JSON", OutputFormat::Json),
+            ("out.JSONL", OutputFormat::Jsonl),
+            ("out.CSV", OutputFormat::Csv),
+            ("out.YAML", OutputFormat::Yaml),
+            ("out.yml", OutputFormat::Yaml),
+            ("out.TOML", OutputFormat::Toml),
+            ("out.PARQUET", OutputFormat::Parquet),
+        ] {
+            let mut args = args();
+            args.output = Some(PathBuf::from(path));
+            assert_eq!(args.resolved_format(), expected, "path: {path}");
+        }
+    }
+
+    #[test]
+    fn unknown_or_missing_output_extension_defaults_to_json() {
+        for path in ["rows", "rows.txt"] {
+            let mut args = args();
+            args.output = Some(PathBuf::from(path));
+            assert_eq!(args.resolved_format(), OutputFormat::Json);
+        }
+    }
+
+    #[test]
+    fn stdin_and_stdout_accept_missing_path_or_dash() {
+        let mut args = args();
+        assert!(args.is_stdin());
+        assert!(args.is_stdout());
+
+        args.input = Some(PathBuf::from("-"));
+        args.output = Some(PathBuf::from("-"));
+        assert!(args.is_stdin());
+        assert!(args.is_stdout());
+
+        args.input = Some(PathBuf::from("dump.sql"));
+        args.output = Some(PathBuf::from("out.json"));
+        assert!(!args.is_stdin());
+        assert!(!args.is_stdout());
     }
 }

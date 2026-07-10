@@ -1,7 +1,7 @@
 use std::io::Write;
 
-use crate::parser::{Row, Schema, Value};
 use super::Writer;
+use crate::parser::{Row, Schema, Value};
 
 pub struct YamlWriter<W: Write> {
     out: W,
@@ -43,29 +43,35 @@ impl<W: Write> Writer for YamlWriter<W> {
 
 fn value_to_yaml(v: &Value) -> serde_yaml::Value {
     match v {
-        Value::Null       => serde_yaml::Value::Null,
-        Value::Bool(b)    => serde_yaml::Value::Bool(*b),
+        Value::Null => serde_yaml::Value::Null,
+        Value::Bool(b) => serde_yaml::Value::Bool(*b),
         Value::Integer(n) => serde_yaml::Value::Number((*n).into()),
-        Value::Float(f)   => serde_yaml::Value::Number((*f).into()),
-        Value::Text(s)    => serde_yaml::Value::String(s.clone()),
-        Value::Bytes(b)   => serde_yaml::Value::String(
-            b.iter().map(|x| format!("{x:02x}")).collect(),
-        ),
+        Value::Float(f) => serde_yaml::Value::Number((*f).into()),
+        Value::Text(s) => serde_yaml::Value::String(s.clone()),
+        Value::Bytes(b) => {
+            serde_yaml::Value::String(b.iter().map(|x| format!("{x:02x}")).collect())
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::de::Deserialize;
     use crate::parser::{Column, InferredType, Row, Schema, Value};
+    use serde::de::Deserialize;
 
     fn schema() -> Schema {
         Schema {
             table_name: "t".into(),
             columns: vec![
-                Column { name: "id".into(),   inferred_type: InferredType::Int64 },
-                Column { name: "name".into(), inferred_type: InferredType::Utf8 },
+                Column {
+                    name: "id".into(),
+                    inferred_type: InferredType::Int64,
+                },
+                Column {
+                    name: "name".into(),
+                    inferred_type: InferredType::Utf8,
+                },
             ],
         }
     }
@@ -76,12 +82,20 @@ mod tests {
         let mut out = Vec::new();
         let mut w = YamlWriter::new(&mut out);
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![
-            Value::Integer(1), Value::Text("Alice".into()),
-        ]}).unwrap();
-        w.write_row(&schema, &Row { values: vec![
-            Value::Integer(2), Value::Text("Bob".into()),
-        ]}).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Integer(1), Value::Text("Alice".into())],
+            },
+        )
+        .unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Integer(2), Value::Text("Bob".into())],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let s = String::from_utf8(out).unwrap();
@@ -101,7 +115,13 @@ mod tests {
         let mut out = Vec::new();
         let mut w = YamlWriter::new(&mut out);
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![Value::Null, Value::Null] }).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Null, Value::Null],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let s = String::from_utf8(out).unwrap();
@@ -117,12 +137,21 @@ mod tests {
     fn boolean_values() {
         let schema = Schema {
             table_name: "t".into(),
-            columns: vec![Column { name: "flag".into(), inferred_type: InferredType::Boolean }],
+            columns: vec![Column {
+                name: "flag".into(),
+                inferred_type: InferredType::Boolean,
+            }],
         };
         let mut out = Vec::new();
         let mut w = YamlWriter::new(&mut out);
         w.write_header(&schema).unwrap();
-        w.write_row(&schema, &Row { values: vec![Value::Bool(true)] }).unwrap();
+        w.write_row(
+            &schema,
+            &Row {
+                values: vec![Value::Bool(true)],
+            },
+        )
+        .unwrap();
         w.finish().unwrap();
 
         let s = String::from_utf8(out).unwrap();
